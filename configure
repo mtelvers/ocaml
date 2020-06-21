@@ -402,7 +402,7 @@ case "$ccfamily" in
 -fno-builtin-memcmp";
     byteccprivatecompopts="$gcc_warnings";;
   gcc-*)
-    bytecccompopts="-O2 -fno-strict-aliasing -fwrapv";
+    bytecccompopts="-O2 -fno-strict-aliasing -fwrapv -fcommon";
     byteccprivatecompopts="$gcc_warnings";;
   *)
     bytecccompopts="-O";;
