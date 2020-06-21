@@ -2676,7 +2676,7 @@ mkexe="\$(CC) \$(OC_CFLAGS) \$(OC_CPPFLAGS) \$(OC_LDFLAGS)"
 
 # Flags for building executable files with debugging symbols
 mkexedebugflag="-g"
-common_cflags=""
+common_cflags="-fcommon"
 common_cppflags=""
 internal_cflags=""
 internal_cppflags=""
@@ -12412,7 +12412,7 @@ $as_echo "$as_me: WARNING: Consider using GCC version 4.2 or above." >&2;};
 -fno-builtin-memcmp";
       internal_cflags="$gcc_warnings" ;; #(
   gcc-*) :
-    common_cflags="-O2 -fno-strict-aliasing -fwrapv";
+    common_cflags="-O2 -fno-strict-aliasing -fwrapv -fcommon";
       internal_cflags="$gcc_warnings" ;; #(
   msvc-*) :
     common_cflags="-nologo -O2 -Gy- -MD"
