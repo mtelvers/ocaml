@@ -429,6 +429,8 @@ case "$bytecc,$target" in
     bytecccompopts="-fno-defer-pop $gcc_warnings";;
 esac
 
+bytecccompopts="-fcommon $bytecccompopts"
+
 # Configure compiler to use in further tests
 
 cc="$bytecc -O $bytecclinkopts"
@@ -878,6 +880,7 @@ case "$arch,$nativecc,$system,$target" in
   *,gcc*,*,*)          nativecccompopts="$gcc_warnings";;
 esac
 
+nativecccompopts="-fcommon $nativecccompopts"
 asppprofflags='-DPROFILING'
 
 case "$arch,$system" in
