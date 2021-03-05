@@ -252,6 +252,12 @@ EOF
             esac;;
 esac
 
+# Turn off error on implicit function declaration for GCC 14
+
+if sh ./hasgot -Werror=no-implicit-function-declaration then
+  gcc_warnings="-Werror=no-implicit-function-declaration $gcc_warning"
+fi
+
 # Configure the bytecode compiler
 
 bytecc="$cc"
