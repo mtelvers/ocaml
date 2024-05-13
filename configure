@@ -232,6 +232,14 @@ EOF
             esac;;
 esac
 
+# Turn errors back into warnings for GCC 14
+
+for w in -Wno-error=implicit-function-declaration -Wno-error=implicit-int; do
+  if cc="$cc" sh ./hasgot $w; then
+    gcc_warnings="$gcc_warnings $w"
+  fi
+done
+
 # Configure the bytecode compiler
 
 bytecc="$cc"
