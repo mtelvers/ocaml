@@ -474,6 +474,8 @@ case "$ccfamily" in
 -fno-builtin-memcmp";
     internal_cflags="$gcc_warnings";;
   gcc-*)
+    cflags="-Wno-implicit -Wno-incompatible-pointer-types";
+    export cflags
     common_cflags="-O2 -fno-strict-aliasing -fwrapv";
     internal_cflags="$gcc_warnings";;
   *)
