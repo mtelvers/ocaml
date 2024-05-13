@@ -13,10 +13,19 @@
 #                                                                       #
 #########################################################################
 
+case "$cc" in
+  *gcc)
+    opts="-Wno-implicit-function-declaration -Wno-implicit-int";
+    ;;
+  *)
+    opts=""
+    ;;
+esac
+
 if test "$verbose" = yes; then
 echo "runtest: $cc -o tst $* $cclibs" >&2
-$cc -o tst $* $cclibs || exit 100
+$cc $opts -o tst $* $cclibs || exit 100
 else
-$cc -o tst $* $cclibs 2> /dev/null || exit 100
+$cc $opts -o tst $* $cclibs 2> /dev/null || exit 100
 fi
 exec ./tst
