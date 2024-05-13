@@ -475,6 +475,8 @@ case "$ccfamily" in
     internal_cflags="$gcc_warnings";;
   gcc-*)
     common_cflags="-O2 -fno-strict-aliasing -fwrapv -fcommon";
+    cflags="-Wno-implicit -Wno-incompatible-pointer-types";
+    export cflags
     internal_cflags="$gcc_warnings";;
   *)
     common_cflags="-O";;
