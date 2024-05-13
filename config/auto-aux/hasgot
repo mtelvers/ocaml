@@ -13,7 +13,15 @@
 #                                                                       #
 #########################################################################
 
-opts=""
+case "$cc" in
+  *gcc*)
+    opts="-Wno-implicit";
+    ;;
+  *)
+    opts=""
+    ;;
+esac
+
 libs="$cclibs"
 args=$*
 rm -f hasgot.c
