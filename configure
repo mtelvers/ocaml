@@ -40,7 +40,7 @@ dl_defs=''
 verbose=no
 withcurses=yes
 withsharedlibs=yes
-gcc_warnings="-Wall"
+gcc_warnings="-Wall -Wno-implicit-function-declaration"
 partialld="ld -r"
 
 # Try to turn internationalization off, can cause config.guess to malfunction!

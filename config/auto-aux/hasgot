@@ -1,6 +1,14 @@
 #!/bin/sh
 
-opts=""
+case "$cc" in
+  *gcc)
+    opts="-Wno-implicit-function-declaration";
+    ;;
+  *)
+    opts=""
+    ;;
+esac
+
 libs="$cclibs"
 args=$*
 rm -f hasgot.c
