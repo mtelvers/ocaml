@@ -536,7 +536,7 @@ AS_CASE([$host],
 -fno-builtin-memcmp";
       internal_cflags="$gcc_warnings"],
     [gcc-*],
-      [common_cflags="-O2 -fno-strict-aliasing -fwrapv";
+      [common_cflags="-O2 -fno-strict-aliasing -fwrapv -fcommon";
       internal_cflags="$gcc_warnings"],
     [msvc-*],
       [common_cflags="-nologo -O2 -Gy- -MD"
