@@ -654,14 +654,30 @@ let emit_instr env i =
         `	cmp	{emit_reg i.arg.(0)}, #{emit_int n}\n`;
         1 + emit_set_condition cmp i.res.(0)
     | Lop(Icompf cmp) ->
-        let comp = name_for_float_comparison cmp in
+        let compthen = name_for_float_comparison cmp in
+        let compelse = name_for_float_comparison (negate_float_comparison cmp) in
         `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         `	fmstat\n`;
-        `	ite	{emit_string comp}\n`;
-        `	mov{emit_string comp}	{emit_reg i.res.(0)}, #1\n`;
-        let compneg = name_for_float_comparison (negate_float_comparison cmp) in
-        `	mov{emit_string compneg}	{emit_reg i.res.(0)}, #0\n`;
-        5
+        if !arch < ARMv8 || not !thumb then begin
+          `	ite	{emit_string compthen}\n`;
+          `	mov{emit_string compthen}	{emit_reg i.res.(0)}, #1\n`;
+          `	mov{emit_string compelse}	{emit_reg i.res.(0)}, #0\n`;
+          5
+        end else begin
+          (* ARMv8 T32 mode - use shorter IT blocks *)
+          if i.res.(0).loc >= 0 && i.res.(0).loc <= 7 then begin
+            `	it	{emit_string compthen}\n`;
+            `	mov{emit_string compthen}	{emit_reg i.res.(0)}, #1\n`;
+            `	it	{emit_string compelse}\n`;
+            `	mov{emit_string compelse}	{emit_reg i.res.(0)}, #0\n`;
+            6
+          end else begin
+            `	ite	{emit_string compthen}\n`;
+            `	mov{emit_string compthen}	{emit_reg i.res.(0)}, #1\n`;
+            `	mov{emit_string compelse}	{emit_reg i.res.(0)}, #0\n`;
+            5
+          end
+        end
     | Lop(Iintop (Icheckbound)) ->
         let lbl = bound_error_label env i.dbg in
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
