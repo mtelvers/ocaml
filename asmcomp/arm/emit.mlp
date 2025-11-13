@@ -26,6 +26,9 @@ open Linear
 open Emitaux
 open Emitenv
 
+(* Track literal pool size (removed from per_function_env in OCaml 5) *)
+let size_literals = ref 0
+
 (* Output a label *)
 
 let emit_label lbl =
@@ -251,14 +254,14 @@ let float_literal env fl =
     x.lbl
   with Not_found ->
     let lbl = new_label() in
-    env.size_literals <- env.size_literals + 2;
+    size_literals := !size_literals + 2;
     env.float_literals <- { fl; lbl } :: env.float_literals;
     lbl
 
 (* Label a GOTREL literal *)
 let gotrel_literal env lbl_pic =
   let lbl_got = new_label() in
-  env.size_literals <- env.size_literals + 1;
+  size_literals := !size_literals + 1;
   env.gotrel_literals <- { lbl_got; lbl_pic } :: env.gotrel_literals;
   lbl_got
 
@@ -269,14 +272,14 @@ let symbol_literal env sym =
     sl.lbl
   with Not_found ->
     let lbl = new_label() in
-    env.size_literals <- env.size_literals + 1;
+    size_literals := !size_literals + 1;
     env.symbol_literals <- { sym; lbl } :: env.symbol_literals;
     lbl
 
 (* Add an offset computation *)
 let offset_literal env dst src =
   let lbl = new_label() in
-  env.size_literals <- env.size_literals + 1;
+  size_literals := !size_literals + 1;
   env.offset_literals <- { lbl; dst; src; } :: env.offset_literals;
   lbl
 
@@ -319,7 +322,7 @@ let emit_literals env =
       env.offset_literals;
     env.offset_literals <- []
   end;
-  env.size_literals <- 0
+  size_literals := 0
 
 (* Emit code to load the address of a symbol *)
 
@@ -892,12 +895,12 @@ let rec emit_all env ninstr fallthrough i =
     let limit = (if !fpu >= VFPv2 && env.float_literals <> []
                  then 127
                  else 511) in
-    let limit = limit - env.size_literals - max_instruction_size i in
+    let limit = limit - !size_literals - max_instruction_size i in
     let ninstr' =
       if ninstr >= limit - 64 && not fallthrough then begin
         emit_literals env;
         0
-      end else if env.size_literals != 0 && ninstr >= limit then begin
+      end else if !size_literals != 0 && ninstr >= limit then begin
         let lbl = new_label() in
         `	b	{emit_label lbl}\n`;
         emit_literals env;
