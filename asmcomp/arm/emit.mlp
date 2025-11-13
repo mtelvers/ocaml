@@ -158,6 +158,18 @@ let name_for_comparison = function
   | Iunsigned Ceq -> "eq" | Iunsigned Cne -> "ne" | Iunsigned Cle -> "ls"
   | Iunsigned Cge -> "cs" | Iunsigned Clt -> "cc" | Iunsigned Cgt -> "hi"
 
+let name_for_float_comparison = function
+  | CFeq -> "eq"
+  | CFneq -> "ne"
+  | CFlt -> "cc"
+  | CFnlt -> "cs"
+  | CFle -> "ls"
+  | CFnle -> "hi"
+  | CFgt -> "gt"
+  | CFngt -> "le"
+  | CFge -> "ge"
+  | CFnge -> "lt"
+
 let name_for_int_operation = function
   (* Use adds,subs,... to enable 16-bit T1 encoding *)
     Iadd  -> "adds"
@@ -266,14 +278,14 @@ let float_literal env fl =
     lbl
 
 (* Label a GOTREL literal *)
-let gotrel_literal env lbl_pic =
+let gotrel_literal _env lbl_pic =
   let lbl_got = new_label() in
   size_literals := !size_literals + 1;
   gotrel_literals := { lbl_got; lbl_pic } :: !gotrel_literals;
   lbl_got
 
 (* Label a symbol literal *)
-let symbol_literal env sym =
+let symbol_literal _env sym =
   try
     let sl = List.find (fun x -> String.equal x.sym sym) !symbol_literals in
     sl.lbl
@@ -284,7 +296,7 @@ let symbol_literal env sym =
     lbl
 
 (* Add an offset computation *)
-let offset_literal env dst src =
+let offset_literal _env dst src =
   let lbl = new_label() in
   size_literals := !size_literals + 1;
   offset_literals := { lbl; dst; src; } :: !offset_literals;
@@ -641,6 +653,15 @@ let emit_instr env i =
     | Lop(Iintop_imm(Icomp cmp, n)) ->
         `	cmp	{emit_reg i.arg.(0)}, #{emit_int n}\n`;
         1 + emit_set_condition cmp i.res.(0)
+    | Lop(Icompf cmp) ->
+        let comp = name_for_float_comparison cmp in
+        `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+        `	fmstat\n`;
+        `	ite	{emit_string comp}\n`;
+        `	mov{emit_string comp}	{emit_reg i.res.(0)}, #1\n`;
+        let compneg = name_for_float_comparison (negate_float_comparison cmp) in
+        `	mov{emit_string compneg}	{emit_reg i.res.(0)}, #0\n`;
+        5
     | Lop(Iintop (Icheckbound)) ->
         let lbl = bound_error_label env i.dbg in
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
@@ -738,6 +759,13 @@ let emit_instr env i =
     | Lop (Idls_get) ->
         (* Here to maintain build *)
         assert false
+    | Lop(Ireturn_addr) ->
+        let n = frame_size env in
+        if env.f.fun_frame_required then begin
+          `	ldr	{emit_reg i.res.(0)}, [sp, #{emit_int(n-4)}]\n`; 1
+        end else begin
+          `	mov	{emit_reg i.res.(0)}, lr\n`; 1
+        end
     | Lreloadretaddr ->
         let n = frame_size env in
         `	ldr	lr, [sp, #{emit_int(n-4)}]\n`; 1
