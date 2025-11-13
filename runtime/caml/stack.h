@@ -42,6 +42,17 @@
    to find the first frame of the next chunk, or to reach the top of the stack.
 */
 
+#ifdef TARGET_arm
+/* Size of the gc_regs structure, in words.
+   See arm.S and arm/proc.ml for the indices */
+#define Wosize_gc_regs (10 /* int regs */ + 16 /* float regs for EABI-HF */)
+#define Saved_return_address_raw(sp) *((intnat *)((sp) - 4))
+#define First_frame(sp) ((sp) + 16)
+#define Saved_gc_regs(sp) (*(value **)((sp) + 8))
+#define Stack_header_size 24
+#define CODE_POINTER_MARK_BIT 0
+#endif
+
 #ifdef TARGET_power
 /* Size of the gc_regs structure, in words.
    See power.S and power/proc.ml for the indices */
