@@ -55,7 +55,7 @@ let frame_size env =
     4 * env.f.fun_num_stack_slots.(0) +
     8 * env.f.fun_num_stack_slots.(1) +
     8 * env.f.fun_num_stack_slots.(2) +
-    (if env.f.fun_contains_calls then 4 else 0)
+    (if env.f.fun_contains_nontail_calls then 4 else 0)
   in Misc.align sz 8
 
 let slot_offset env loc cl =
@@ -405,12 +405,11 @@ let emit_instr env i =
     match i.desc with
     | Lend -> 0
     | Lprologue ->
-      assert (env.f.fun_prologue_required);
       let n = frame_size env in
       let num_instrs =
         if n > 0 then begin
           let num_instrs = emit_stack_adjustment (-n) in
-          if env.f.fun_contains_calls then begin
+          if env.f.fun_contains_nontail_calls then begin
             cfi_offset ~reg:14 (* lr *) ~offset:(-4);
             `	str	lr, [sp, #{emit_int(n - 4)}]\n`;
             num_instrs + 1
@@ -500,7 +499,7 @@ let emit_instr env i =
         `{record_frame env i.live (Dbg_other i.dbg)}\n`; 1
     | Lop(Itailcall_ind) ->
         output_epilogue env begin fun () ->
-          if env.f.fun_contains_calls then
+          if env.f.fun_contains_nontail_calls then
             `	ldr	lr, [sp, #{emit_int (-4)}]\n`;
           `	bx	{emit_reg i.arg.(0)}\n`; 2
         end
@@ -509,7 +508,7 @@ let emit_instr env i =
           `	b	{emit_label env.f.fun_tailrec_entry_point_label}\n`; 1
         end else begin
           output_epilogue env begin fun () ->
-            if env.f.fun_contains_calls then
+            if env.f.fun_contains_nontail_calls then
               `	ldr	lr, [sp, #{emit_int (-4)}]\n`;
             `	{emit_jump func}\n`; 2
           end
