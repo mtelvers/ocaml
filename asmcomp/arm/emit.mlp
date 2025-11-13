@@ -658,25 +658,10 @@ let emit_instr env i =
         let compelse = name_for_float_comparison (negate_float_comparison cmp) in
         `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         `	fmstat\n`;
-        if !arch < ARMv8 || not !thumb then begin
-          `	ite	{emit_string compthen}\n`;
-          `	mov{emit_string compthen}	{emit_reg i.res.(0)}, #1\n`;
-          `	mov{emit_string compelse}	{emit_reg i.res.(0)}, #0\n`;
-          5
-        end else begin
-          (* ARMv8 T32 mode - use shorter IT blocks if register is r0-r7 *)
-          let temp =
-            match i.res.(0).loc with
-            | Reg r when r < 8 -> i.res.(0)
-            | _ -> phys_reg 3 in
-          `	it	{emit_string compthen}\n`;
-          `	mov{emit_string compthen}	{emit_reg temp}, #1\n`;
-          `	it	{emit_string compelse}\n`;
-          `	mov{emit_string compelse}	{emit_reg temp}, #0\n`;
-          if temp.loc = i.res.(0).loc then 6 else begin
-            `	movs	{emit_reg i.res.(0)}, {emit_reg temp}\n`; 7
-          end
-        end
+        `	ite	{emit_string compthen}\n`;
+        `	mov{emit_string compthen}	{emit_reg i.res.(0)}, #1\n`;
+        `	mov{emit_string compelse}	{emit_reg i.res.(0)}, #0\n`;
+        5
     | Lop(Iintop (Icheckbound)) ->
         let lbl = bound_error_label env i.dbg in
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
