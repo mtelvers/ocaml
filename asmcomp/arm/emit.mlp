@@ -654,6 +654,8 @@ let emit_instr env i =
         `	cmp	{emit_reg i.arg.(0)}, #{emit_int n}\n`;
         1 + emit_set_condition cmp i.res.(0)
     | Lop(Icompf cmp) ->
+        (* Icompf should only be generated in VFP mode; soft-float uses external calls *)
+        assert (!fpu >= VFPv2);
         let compthen = name_for_float_comparison cmp in
         let compelse = name_for_float_comparison (negate_float_comparison cmp) in
         `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
@@ -761,11 +763,7 @@ let emit_instr env i =
         `	ldr	{emit_reg i.res.(0)}, [r11, #{emit_int offset}]\n`; 1
     | Lop(Ireturn_addr) ->
         let n = frame_size env in
-        if env.f.fun_frame_required then begin
-          `	ldr	{emit_reg i.res.(0)}, [sp, #{emit_int(n-4)}]\n`; 1
-        end else begin
-          `	mov	{emit_reg i.res.(0)}, lr\n`; 1
-        end
+        `	ldr	{emit_reg i.res.(0)}, [sp, #{emit_int(n-4)}]\n`; 1
     | Lreloadretaddr ->
         let n = frame_size env in
         `	ldr	lr, [sp, #{emit_int(n-4)}]\n`; 1
