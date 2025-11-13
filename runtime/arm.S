@@ -178,11 +178,9 @@ caml_hot.code_end:
         stmia   r7, {r0-r7}
         str     r12, [r12, 36]  /* save r12 itself */
 #if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
-    /* Save caller-save floating-point registers */
+    /* Save caller-save floating-point registers (d0-d7, d16-d31 are caller-save on ARM) */
         add     r7, r12, #40
         vstmia  r7, {d0-d7}
-        add     r7, r12, #104
-        vstmia  r7, {d16-d31}
 #endif
         add     r12, r12, #4
         str     r12, Caml_state(gc_regs)
@@ -201,8 +199,6 @@ caml_hot.code_end:
     /* Restore floating-point registers */
         add     r7, r12, #40
         vldmia  r7, {d0-d7}
-        add     r7, r12, #104
-        vldmia  r7, {d16-d31}
 #endif
     /* Put gc_regs struct back in bucket linked list */
         ldr     r7, Caml_state(gc_regs_buckets)
@@ -413,8 +409,8 @@ FUNCTION(caml_start_program)
         .align  2
 .Ltrap_handler:
         CFI_STARTPROC
-    /* Save exception pointer */
-        str     trap_ptr, Caml_state(exception_pointer)
+    /* Save exception handler */
+        str     trap_ptr, Caml_state(exn_handler)
     /* Encode exception bucket as an exception result */
         orr     r0, r0, 2
     /* Return it */
@@ -457,7 +453,8 @@ FUNCTION(caml_raise_exn)
 FUNCTION(caml_reraise_exn)
         CFI_STARTPROC
         ldr     r1, Caml_state(backtrace_active)
-        cbnz    r1, .Lcaml_reraise_exn_stash
+        cmp     r1, #0
+        bne     .Lcaml_reraise_exn_stash
         mov     sp, trap_ptr
         pop     {trap_ptr, pc}
         CFI_ENDPROC
@@ -472,7 +469,7 @@ FUNCTION(caml_raise_exception)
     /* Load exception bucket */
         mov     r0, r1
     /* Reload trap ptr and alloc ptr */
-        ldr     trap_ptr, Caml_state(exception_pointer)
+        ldr     trap_ptr, Caml_state(exn_handler)
         ldr     alloc_ptr, Caml_state(young_ptr)
     /* Test if backtrace is active */
         ldr     r1, Caml_state(backtrace_active)
