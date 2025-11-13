@@ -756,9 +756,9 @@ let emit_instr env i =
         | _ ->
             assert false
         end
-    | Lop (Idls_get) ->
-        (* Here to maintain build *)
-        assert false
+    | Lop(Idls_get) ->
+        let offset = Domainstate.(idx_of_field Domain_dls_root) * size_addr in
+        `	ldr	{emit_reg i.res.(0)}, [r11, #{emit_int offset}]\n`; 1
     | Lop(Ireturn_addr) ->
         let n = frame_size env in
         if env.f.fun_frame_required then begin
