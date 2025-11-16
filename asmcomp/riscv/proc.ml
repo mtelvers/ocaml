@@ -232,6 +232,10 @@ let loc_external_results res =
 
 let loc_exn_bucket = phys_reg 0
 
+(* Volatile registers: none *)
+
+let regs_are_volatile _ = false
+
 (* Registers destroyed by operations *)
 
 let destroyed_at_c_noalloc_call =
