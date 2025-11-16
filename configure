@@ -24017,7 +24017,7 @@ then :
   function_sections=false
 else $as_nop
   case $arch in #(
-  amd64|arm64|power|riscv|s390x) :
+  amd64|i386|arm64|power|riscv|s390x) :
     # not supported on arm32, see issue #9124.
      case $target in #(
   *-*-cygwin|*-w64-mingw32*|*-pc-windows|*-apple-darwin*) :
