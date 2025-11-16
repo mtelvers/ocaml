@@ -4307,6 +4307,125 @@ asmcomp/stackframe.cmx : \
     utils/config.cmx \
     asmcomp/stackframe.cmi
 endif # ifeq "$(ARCH)" "riscv"
+ifeq "$(ARCH)" "arm"
+asmcomp/CSE.cmo : \
+    asmcomp/mach.cmi \
+    asmcomp/CSEgen.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/CSE.cmi
+asmcomp/CSE.cmx : \
+    asmcomp/mach.cmx \
+    asmcomp/CSEgen.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/CSE.cmi
+asmcomp/arch.cmo : \
+    utils/config.cmi \
+    utils/clflags.cmi \
+    asmcomp/arch.cmi
+asmcomp/arch.cmx : \
+    utils/config.cmx \
+    utils/clflags.cmx \
+    asmcomp/arch.cmi
+asmcomp/arch.cmi :
+asmcomp/emit.cmo : \
+    asmcomp/reg.cmi \
+    asmcomp/proc.cmi \
+    utils/misc.cmi \
+    asmcomp/mach.cmi \
+    asmcomp/linear.cmi \
+    lambda/lambda.cmi \
+    asmcomp/emitenv.cmi \
+    asmcomp/emitaux.cmi \
+    utils/domainstate.cmi \
+    utils/config.cmi \
+    middle_end/compilenv.cmi \
+    asmcomp/cmm.cmi \
+    utils/clflags.cmi \
+    asmcomp/branch_relaxation.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/emit.cmi
+asmcomp/emit.cmx : \
+    asmcomp/reg.cmx \
+    asmcomp/proc.cmx \
+    utils/misc.cmx \
+    asmcomp/mach.cmx \
+    asmcomp/linear.cmx \
+    lambda/lambda.cmx \
+    asmcomp/emitenv.cmi \
+    asmcomp/emitaux.cmx \
+    utils/domainstate.cmx \
+    utils/config.cmx \
+    middle_end/compilenv.cmx \
+    asmcomp/cmm.cmx \
+    utils/clflags.cmx \
+    asmcomp/branch_relaxation.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/emit.cmi
+asmcomp/proc.cmo : \
+    asmcomp/reg.cmi \
+    utils/misc.cmi \
+    asmcomp/mach.cmi \
+    utils/config.cmi \
+    asmcomp/cmm.cmi \
+    utils/clflags.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/proc.cmi
+asmcomp/proc.cmx : \
+    asmcomp/reg.cmx \
+    utils/misc.cmx \
+    asmcomp/mach.cmx \
+    utils/config.cmx \
+    asmcomp/cmm.cmx \
+    utils/clflags.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/proc.cmi
+asmcomp/reload.cmo : \
+    asmcomp/reloadgen.cmi \
+    asmcomp/mach.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/reload.cmi
+asmcomp/reload.cmx : \
+    asmcomp/reloadgen.cmx \
+    asmcomp/mach.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/reload.cmi
+asmcomp/scheduling.cmo : \
+    asmcomp/schedgen.cmi \
+    asmcomp/mach.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/scheduling.cmi
+asmcomp/scheduling.cmx : \
+    asmcomp/schedgen.cmx \
+    asmcomp/mach.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/scheduling.cmi
+asmcomp/selection.cmo : \
+    asmcomp/selectgen.cmi \
+    asmcomp/reg.cmi \
+    asmcomp/proc.cmi \
+    asmcomp/mach.cmi \
+    asmcomp/cmm.cmi \
+    utils/clflags.cmi \
+    asmcomp/arch.cmi \
+    asmcomp/selection.cmi
+asmcomp/selection.cmx : \
+    asmcomp/selectgen.cmx \
+    asmcomp/reg.cmx \
+    asmcomp/proc.cmx \
+    asmcomp/mach.cmx \
+    asmcomp/cmm.cmx \
+    utils/clflags.cmx \
+    asmcomp/arch.cmx \
+    asmcomp/selection.cmi
+asmcomp/stackframe.cmo : \
+    asmcomp/stackframegen.cmi \
+    asmcomp/mach.cmi \
+    asmcomp/stackframe.cmi
+asmcomp/stackframe.cmx : \
+    asmcomp/stackframegen.cmx \
+    asmcomp/mach.cmx \
+    asmcomp/stackframe.cmi
+endif # ifeq "$(ARCH)" "arm"
 middle_end/backend_intf.cmi : \
     middle_end/symbol.cmi \
     middle_end/flambda/simple_value_approx.cmi \
