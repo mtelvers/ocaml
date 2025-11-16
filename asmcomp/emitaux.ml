@@ -538,6 +538,10 @@ let mk_env f : Emitenv.per_function_env =
     jumptables = [];
     float_literals = [];
     int_literals = [];
+    offset_literals = [];
+    gotrel_literals = [];
+    symbol_literals = [];
+    size_literals = 0;
   }
 
 let emit_named_text_section func_name prefix_char =
