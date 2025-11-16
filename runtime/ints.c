@@ -438,50 +438,73 @@ CAMLexport value caml_copy_int64(int64_t i)
   return res;
 }
 
+/* Unboxed int64 operations for 32-bit platforms */
+
+CAMLprim int64_t caml_int64_neg_native(int64_t i)
+{ return -i; }
+
 CAMLprim value caml_int64_neg(value v)
-{ return caml_copy_int64(- Int64_val(v)); }
+{ return caml_copy_int64(caml_int64_neg_native(Int64_val(v))); }
+
+CAMLprim int64_t caml_int64_add_native(int64_t i1, int64_t i2)
+{ return i1 + i2; }
 
 CAMLprim value caml_int64_add(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) + Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_add_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_sub_native(int64_t i1, int64_t i2)
+{ return i1 - i2; }
 
 CAMLprim value caml_int64_sub(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) - Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_sub_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_mul_native(int64_t i1, int64_t i2)
+{ return i1 * i2; }
 
 CAMLprim value caml_int64_mul(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) * Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_mul_native(Int64_val(v1), Int64_val(v2))); }
 
-CAMLprim value caml_int64_div(value v1, value v2)
+CAMLprim int64_t caml_int64_div_native(int64_t dividend, int64_t divisor)
 {
-  int64_t dividend = Int64_val(v1);
-  int64_t divisor = Int64_val(v2);
   if (divisor == 0) caml_raise_zero_divide();
   /* PR#4740: on some processors, division crashes on overflow.
      Implement the same behavior as for type "int". */
-  if (dividend == INT64_MIN && divisor == -1) return v1;
-  return caml_copy_int64(dividend / divisor);
+  if (dividend == ((int64_t)1 << 63) && divisor == -1) return dividend;
+  return dividend / divisor;
+}
+
+CAMLprim value caml_int64_div(value v1, value v2)
+{ return caml_copy_int64(caml_int64_div_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_mod_native(int64_t dividend, int64_t divisor)
+{
+  if (divisor == 0) caml_raise_zero_divide();
+  /* PR#4740: on some processors, division crashes on overflow.
+     Implement the same behavior as for type "int". */
+  if (dividend == ((int64_t)1 << 63) && divisor == -1) return 0;
+  return dividend % divisor;
 }
 
 CAMLprim value caml_int64_mod(value v1, value v2)
-{
-  int64_t dividend = Int64_val(v1);
-  int64_t divisor = Int64_val(v2);
-  if (divisor == 0) caml_raise_zero_divide();
-  /* PR#4740: on some processors, division crashes on overflow.
-     Implement the same behavior as for type "int". */
-  if (dividend == INT64_MIN && divisor == -1){
-    return caml_copy_int64(0);
-  }
-  return caml_copy_int64(dividend % divisor);
-}
+{ return caml_copy_int64(caml_int64_mod_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_and_native(int64_t i1, int64_t i2)
+{ return i1 & i2; }
 
 CAMLprim value caml_int64_and(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) & Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_and_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_or_native(int64_t i1, int64_t i2)
+{ return i1 | i2; }
 
 CAMLprim value caml_int64_or(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) | Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_or_native(Int64_val(v1), Int64_val(v2))); }
+
+CAMLprim int64_t caml_int64_xor_native(int64_t i1, int64_t i2)
+{ return i1 ^ i2; }
 
 CAMLprim value caml_int64_xor(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) ^ Int64_val(v2)); }
+{ return caml_copy_int64(caml_int64_xor_native(Int64_val(v1), Int64_val(v2))); }
 
 CAMLprim value caml_int64_shift_left(value v1, value v2)
 { return caml_copy_int64(Int64_val(v1) << Int_val(v2)); }

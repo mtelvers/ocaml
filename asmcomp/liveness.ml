@@ -73,6 +73,12 @@ let fundecl f =
   (* Sanity check: only function parameters can be live at entrypoint *)
   let wrong_live = Reg.Set.diff initially_live (Reg.set_of_array f.fun_args) in
   if not (Reg.Set.is_empty wrong_live) then begin
+    (* DEBUG: Print function body and live sets to understand the issue *)
+    Format.eprintf "@[<v>DEBUG: Liveness error in function %s@\n" f.fun_name;
+    Format.eprintf "Function arguments: %a@\n" Printmach.regset (Reg.set_of_array f.fun_args);
+    Format.eprintf "Initially live: %a@\n" Printmach.regset initially_live;
+    Format.eprintf "Wrong live (not parameters): %a@\n" Printmach.regset wrong_live;
+    Format.eprintf "@\nFunction body:@\n%a@]@." Printmach.instr f.fun_body;
     Misc.fatal_errorf "@[Liveness.fundecl:@\n%a@]"
       Printmach.regset wrong_live
   end

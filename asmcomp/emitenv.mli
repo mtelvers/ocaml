@@ -82,4 +82,10 @@ type per_function_env = {
   (* pending literals *)
   mutable float_literals : float_literal list;   (* in all except amd64 *)
   mutable int_literals : int_literal list;             (* used only in s390x *)
+  mutable offset_literals : offset_computation list;     (* used only in arm *)
+  mutable gotrel_literals : gotrel_literal list;         (* used only in arm *)
+  mutable symbol_literals : symbol_literal list;         (* used only in arm *)
+  (* [size_literals] is the total space (in words) occupied
+     by pending literals. *)
+  mutable size_literals : int;                           (* used only in arm *)
 }
