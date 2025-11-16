@@ -42,6 +42,10 @@
    to find the first frame of the next chunk, or to reach the top of the stack.
 */
 
+#ifdef TARGET_i386
+#define Saved_return_address(sp) *((intnat *)((sp) - 4))
+#endif
+
 #ifdef TARGET_power
 /* Size of the gc_regs structure, in words.
    See power.S and power/proc.ml for the indices */
@@ -74,6 +78,10 @@
 #define First_frame(sp) ((sp) + 8)
 #define Saved_gc_regs(sp) (*(value **)((sp) + 24))
 #define Stack_header_size 32
+#endif
+
+#ifdef TARGET_arm
+#define Saved_return_address(sp) *((intnat *)((sp) - 4))
 #endif
 
 #ifdef TARGET_amd64
