@@ -62,10 +62,12 @@ compiler currently runs on the following platforms:
 
 |====
 |                |  Tier 1 (actively maintained)   | Tier 2 (maintained when possible)
-
 | x86 64 bits    | Linux, macOS, Windows, FreeBSD  |  NetBSD, OpenBSD, DragonFly, OmniOS (Solaris)
-| ARM 64 bits    | Linux, macOS                    |  FreeBSD, OpenBSD, NetBSD
+| x86 32 bits    | Linux, Windows                  |  FreeBSD, NetBSD, OpenBSD
+| ARM 64 bits    | Linux, macOS                    |  FreeBSD
+| ARM 32 bits    | Linux                           |  FreeBSD, NetBSD, OpenBSD
 | Power 64 bits  | Linux (little-endian, ABIv2)    |  Linux (big-endian, ABIv2)
+| Power 32 bits  | Linux                           |
 | RISC-V 64 bits | Linux                           |
 | IBM Z (s390x)  | Linux                           |
 |====

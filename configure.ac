@@ -2998,7 +2998,7 @@ oc_native_compflags=''
 AS_IF([test x"$enable_function_sections" = "xno"],
   [function_sections=false],
   [AS_CASE([$arch],
-    [amd64|arm64|power|riscv|s390x], # not supported on arm32, see issue #9124.
+    [amd64|i386|arm64|power|riscv|s390x], # not supported on arm32, see issue #9124.
      [AS_CASE([$target],
         [*-*-cygwin|*-w64-mingw32*|*-pc-windows|*-apple-darwin*],
           [function_sections=false;
