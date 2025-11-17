@@ -230,6 +230,11 @@ method! select_operation op args dbg =
   | (Cextcall("caml_int32_direct_bswap", _, _, _), args)
     when !arch >= ARMv6 ->
       (Ispecific(Ibswap 32), args)
+  (* Use trivial addressing mode for atomic loads *)
+  | (Cload {memory_chunk; mutability; is_atomic = true}, args) ->
+      (Iload {memory_chunk; addressing_mode = Iindexed 0;
+              mutability; is_atomic = true},
+       args)
   (* Turn floating-point operations into runtime ABI calls for softfp *)
   | (op, args) when !fpu = Soft -> self#select_operation_softfp op args dbg
   (* Select operations for VFPv{2,3} *)
