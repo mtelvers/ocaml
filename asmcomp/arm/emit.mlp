@@ -768,10 +768,14 @@ let emit_instr env i =
             if !arch >= ARMv8 then begin
               (* ARMv8 has load-acquire instruction *)
               `	ldar	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`; 1
-            end else begin
+            end else if !arch >= ARMv7 then begin
               (* ARMv7 uses ldr + dmb for acquire semantics *)
               `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
               `	dmb	ish\n`; 2
+            end else begin
+              (* ARMv6 and earlier use ldr + CP15 memory barrier *)
+              `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
+              `	mcr	p15, 0, r0, c7, c10, 5\n`; 2
             end
         | _ ->
             let instr =
@@ -814,9 +818,13 @@ let emit_instr env i =
                   (* ARMv8 has store-release instruction *)
                   assert (addr = Iindexed 0);
                   `	stlr	{emit_reg r}, [{emit_reg i.arg.(1)}]\n`; 1
-                end else begin
+                end else if !arch >= ARMv7 then begin
                   (* ARMv7 uses dmb + str for release semantics *)
                   `	dmb	ish\n`;
+                  `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
+                end else begin
+                  (* ARMv6 and earlier use CP15 memory barrier + str *)
+                  `	mcr	p15, 0, r0, c7, c10, 5\n`;
                   `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
                 end
               end else begin
