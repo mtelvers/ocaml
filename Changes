@@ -24,7 +24,7 @@ Working version
   past behavior of discriminating abstract types defined in the current module.
   (Takafumi Saikawa, Jacques Garrigue, review by Richard Eisenberg)
 
-- #13806 Enable the use of function parameters with polymorphic types.
+- #13806: Enable the use of function parameters with polymorphic types.
   (Ulysse Gérard, Leo White, review by Florian Angeletti, Samuel Vivien, Gabriel
   Scherer and Jacques Garrigue)
 
@@ -87,6 +87,9 @@ Working version
 ### Code generation and optimizations:
 
 ### Standard library:
+
+- #14352: Add String.{drop,take,cut}_{first,last}.
+  (Daniel Bünzli, review by David Allsopp, Vincent Laviron)
 
 - #14185: List.split_map
   (Jeremy Yallop, review by Daniel Bünzli, Nicolás Ojeda Bär and Damien Doligez)

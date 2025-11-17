@@ -172,9 +172,15 @@ distclean:: clean
 
 ifeq "$(COMPUTE_DEPS)" "true"
 ifneq "$(COBJS_BYTECODE)" ""
-include $(addprefix $(DEPDIR)/, $(COBJS_BYTECODE:.b.$(O)=.$(D)))
+include $(addprefix $(DEPDIR)/, $(COBJS_BYTECODE:.$(O)=.$(D)))
+ifeq "$(NATIVE_COMPILER)" "true"
+include $(addprefix $(DEPDIR)/, $(COBJS_NATIVE:.$(O)=.$(D)))
+endif
 endif
 endif
 
-$(DEPDIR)/%.$(D): %.c | $(DEPDIR)
-	$(V_CCDEPS)$(DEP_CC) $(OC_CPPFLAGS) $(CPPFLAGS) $< -MT '$*.$(O)' -MF $@
+$(DEPDIR)/%.b.$(D): %.c | $(DEPDIR)
+	$(V_CCDEPS)$(DEP_CC) $(OC_CPPFLAGS) $(CPPFLAGS) $< -MT '$*.b.$(O)' -MF $@
+
+$(DEPDIR)/%.n.$(D): %.c | $(DEPDIR)
+	$(V_CCDEPS)$(DEP_CC) $(OC_CPPFLAGS) $(CPPFLAGS) $< -MT '$*.n.$(O)' -MF $@
