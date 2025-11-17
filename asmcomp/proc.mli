@@ -55,12 +55,6 @@ val destroyed_at_reloadretaddr : Reg.t array
 (* Volatile registers: those that change value when read *)
 val regs_are_volatile: Reg.t array -> bool
 
-(* Info for laying out the stack frame *)
-val frame_required : Mach.fundecl -> bool
-
-(* Function prologues *)
-val prologue_required : Mach.fundecl -> bool
-
 (** For a given register class, the DWARF register numbering for that class.
     Given an allocated register with location [Reg n] and class [reg_class], the
     returned array contains the corresponding DWARF register number at index
