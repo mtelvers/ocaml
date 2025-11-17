@@ -81,7 +81,13 @@
 #endif
 
 #ifdef TARGET_arm
-#define Saved_return_address(sp) *((intnat *)((sp) - 4))
+/* Size of the gc_regs structure, in words.
+   See arm.S and arm/proc.ml for the indices */
+#define Wosize_gc_regs (2 + 9 /* int regs */ + 16 /* float regs */)
+#define Saved_return_address_raw(sp) *((intnat *)((sp) - 4))
+#define First_frame(sp) ((sp) + 4)
+#define Saved_gc_regs(sp) (*(value **)((sp) + 12))
+#define Stack_header_size 16
 #endif
 
 #ifdef TARGET_amd64
