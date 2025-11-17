@@ -49,13 +49,19 @@ let emit_reg = function
     {loc = Reg r} -> emit_string (register_name r)
   | _ -> fatal_error "Emit_arm.emit_reg"
 
+(* Physical registers for stack arguments *)
+let reg_stack_arg_begin = phys_reg 4  (* r4 *)
+let reg_stack_arg_end = phys_reg 5    (* r5 *)
+
+let initial_stack_offset f =
+  4 * f.fun_num_stack_slots.(0) +
+  8 * f.fun_num_stack_slots.(1) +
+  8 * f.fun_num_stack_slots.(2) +
+  (if f.fun_frame_required then 4 else 0)
+
 let frame_size env =
   let sz =
-    env.stack_offset +
-    4 * env.f.fun_num_stack_slots.(0) +
-    8 * env.f.fun_num_stack_slots.(1) +
-    8 * env.f.fun_num_stack_slots.(2) +
-    (if env.f.fun_contains_calls then 4 else 0)
+    env.stack_offset + initial_stack_offset env.f
   in Misc.align sz 8
 
 let slot_offset env loc cl =
@@ -147,6 +153,18 @@ let name_for_comparison = function
   | Isigned Cge -> "ge" | Isigned Clt -> "lt" | Isigned Cgt -> "gt"
   | Iunsigned Ceq -> "eq" | Iunsigned Cne -> "ne" | Iunsigned Cle -> "ls"
   | Iunsigned Cge -> "cs" | Iunsigned Clt -> "cc" | Iunsigned Cgt -> "hi"
+
+let name_for_float_comparison = function
+  | CFeq -> "eq"
+  | CFneq -> "ne"
+  | CFlt -> "cc"
+  | CFnlt -> "cs"
+  | CFle -> "ls"
+  | CFnle -> "hi"
+  | CFgt -> "gt"
+  | CFngt -> "le"
+  | CFge -> "ge"
+  | CFnge -> "lt"
 
 let name_for_int_operation = function
   (* Use adds,subs,... to enable 16-bit T1 encoding *)
@@ -388,6 +406,178 @@ let emit_load_handler_address env handler =
   `	add	lr, pc, lr\n`;
   2
 
+(* The following functions are used for calculating the sizes of the
+   call GC and bounds check points emitted out-of-line from the function
+   body.  See branch_relaxation.mli. *)
+
+let num_call_gc_and_check_bound_points env =
+  let rec loop instr ((call_gc, check_bound) as totals) =
+    match instr.desc with
+    | Lend -> totals
+    | Lop (Ialloc _) when env.f.fun_fast ->
+      loop instr.next (call_gc + 1, check_bound)
+    | Lop (Ipoll _) ->
+      loop instr.next (call_gc + 1, check_bound)
+    | Lop (Iintop Icheckbound)
+    | Lop (Iintop_imm (Icheckbound, _))
+    | Lop (Ispecific (Ishiftcheckbound _)) ->
+      let check_bound =
+        (* When not in debug mode, there is at most one check-bound point. *)
+        if not !Clflags.debug then 1
+        else check_bound + 1
+      in
+      loop instr.next (call_gc, check_bound)
+    | _ -> loop instr.next totals
+  in
+  loop env.f.fun_body (0, 0)
+
+let max_out_of_line_code_offset ~num_call_gc ~num_check_bound =
+  if num_call_gc < 1 && num_check_bound < 1 then 0
+  else begin
+    let size_of_call_gc = 2 in
+    let size_of_check_bound = 2 in
+    let size_of_last_thing =
+      (* Call-GC points come before check-bound points. *)
+      if num_check_bound >= 1 then size_of_check_bound else size_of_call_gc
+    in
+    let total_size =
+      size_of_call_gc*num_call_gc + size_of_check_bound*num_check_bound
+    in
+    let max_offset = total_size - size_of_last_thing in
+    assert (max_offset >= 0);
+    max_offset
+  end
+
+(* Upper bound on the size of the code sequence for a Linear instruction,
+   in 32-bit words. *)
+
+let max_instruction_size = function
+  | Lswitch jumptbl ->
+      if !arch > ARMv6 && !thumb
+      then 1 + (Array.length jumptbl + 1) / 2 + Array.length jumptbl
+      else 2 + Array.length jumptbl
+  | _ ->
+      8   (* conservative upper bound; the true upper bound is probably 5 *)
+
+module BR = Branch_relaxation.Make (struct
+  type distance = int
+
+  module Cond_branch = struct
+    type t = B
+
+    let all = [B]
+
+    (* ARM instructions are 32 bits wide, so [distance] in this module
+       means units of 32-bit words. *)
+    let max_displacement = function
+      | B -> 2 * 1024 * 1024 / 4  (* +/- 2MB for Thumb-2 *)
+
+    let classify_instr = function
+      | Lop (Ialloc _)
+      | Lop (Ipoll _)
+      | Lop (Iintop Icheckbound)
+      | Lop (Iintop_imm (Icheckbound, _))
+      | Lop (Ispecific (Ishiftcheckbound _)) -> Some B
+      | Lcondbranch _ -> Some B
+      | Lcondbranch3 _ -> Some B
+      | _ -> None
+  end
+
+  let offset_pc_at_branch = 0
+
+  let prologue_size f =
+    if initial_stack_offset f > 0 then
+      if f.fun_frame_required then 2 else 1
+    else 0
+
+  let epilogue_size f =
+    if initial_stack_offset f > 0 then 2 else 1
+
+  let instr_size f = function
+    | Lend -> 0
+    | Lprologue -> prologue_size f
+    | Lop (Imove | Ispill | Ireload) -> 1
+    | Lop (Iconst_int _) -> 2
+    | Lop (Iconst_float _) -> 3
+    | Lop (Iconst_symbol _) -> 2
+    | Lop (Icall_ind) -> 3
+    | Lop (Icall_imm _) -> 2
+    | Lop (Itailcall_ind) -> epilogue_size f + 2
+    | Lop (Itailcall_imm { func; _ }) ->
+      if func = f.fun_name then 1 else epilogue_size f + 1
+    | Lop (Iextcall _) -> 5
+    | Lop (Istackoffset _) -> 2
+    | Lop (Iload _) -> 3
+    | Lop (Istore _) -> 3
+    | Lop (Ialloc _) -> 5
+    | Lop (Ipoll _) -> 3
+    | Lop (Iintop (Icomp _)) -> 2
+    | Lop (Iintop_imm (Icomp _, _)) -> 2
+    | Lop (Iintop (Icheckbound)) -> 2
+    | Lop (Iintop_imm (Icheckbound, _)) -> 2
+    | Lop (Iintop _) -> 1
+    | Lop (Iintop_imm _) -> 1
+    | Lop (Ifloatofint | Iintoffloat | Iabsf | Inegf) -> 2
+    | Lop (Iaddf | Isubf | Imulf | Idivf) -> 1
+    | Lop (Icompf _) -> 2
+    | Lop (Iopaque) -> 0
+    | Lop (Ispecific (Ishiftcheckbound _)) -> 2
+    | Lop (Ispecific (Ishiftarith _)) -> 1
+    | Lop (Ispecific (Irevsubimm _)) -> 1
+    | Lop (Ispecific (Imuladd | Imulsub)) -> 1
+    | Lop (Ispecific (Imuladdf | Inegmuladdf | Imulsubf | Inegmulsubf)) -> 1
+    | Lop (Ispecific (Ibswap _)) -> 2
+    | Lop (Ispecific (Imulhadd)) -> 1
+    | Lop (Ispecific (Isqrtf)) -> 1
+    | Lop (Ispecific (Inegmulf)) -> 1
+    | Lop (Idls_get) -> 2
+    | Lop (Ireturn_addr) -> 1
+    | Lreloadretaddr -> 2
+    | Lreturn -> epilogue_size f
+    | Llabel _ -> 0
+    | Lbranch _ -> 1
+    | Lcondbranch (tst, _) ->
+      begin match tst with
+      | Itruetest -> 1
+      | Ifalsetest -> 1
+      | Iinttest _ -> 2
+      | Iinttest_imm _ -> 2
+      | Ifloattest _ -> 2
+      | Ioddtest -> 2
+      | Ieventest -> 2
+      end
+    | Lcondbranch3 (lbl0, lbl1, lbl2) ->
+      1 + begin match lbl0 with None -> 0 | Some _ -> 1 end
+        + begin match lbl1 with None -> 0 | Some _ -> 1 end
+        + begin match lbl2 with None -> 0 | Some _ -> 1 end
+    | Lswitch jumptbl -> max_instruction_size (Lswitch jumptbl)
+    | Lentertrap -> 0
+    | Ladjust_trap_depth _ -> 1
+    | Lpushtrap _ -> 4
+    | Lpoptrap -> 2
+    | Lraise k ->
+      begin match k with
+      | Lambda.Raise_regular -> 2
+      | Lambda.Raise_reraise -> 2
+      | Lambda.Raise_notrace -> 4
+      end
+
+  let relax_poll ~return_label =
+    Lop (Ipoll { return_label })
+
+  let relax_allocation ~num_bytes ~dbginfo =
+    Lop (Ialloc { bytes = num_bytes; dbginfo })
+
+  let relax_intop_checkbound () =
+    Lop (Iintop Icheckbound)
+
+  let relax_intop_imm_checkbound ~bound =
+    Lop (Iintop_imm (Icheckbound, bound))
+
+  let relax_specific_op = function
+    | Ishiftcheckbound _ as op -> Lop (Ispecific op)
+    | _ -> assert false
+end)
 
 (* Output .text section directive, or named .text.caml.<name> if enabled. *)
 
@@ -405,12 +595,12 @@ let emit_instr env i =
     match i.desc with
     | Lend -> 0
     | Lprologue ->
-      assert (env.f.fun_prologue_required);
+      assert (env.f.fun_frame_required);
       let n = frame_size env in
       let num_instrs =
         if n > 0 then begin
           let num_instrs = emit_stack_adjustment (-n) in
-          if env.f.fun_contains_calls then begin
+          if env.f.fun_frame_required then begin
             cfi_offset ~reg:14 (* lr *) ~offset:(-4);
             `	str	lr, [sp, #{emit_int(n - 4)}]\n`;
             num_instrs + 1
@@ -500,7 +690,7 @@ let emit_instr env i =
         `{record_frame env i.live (Dbg_other i.dbg)}\n`; 1
     | Lop(Itailcall_ind) ->
         output_epilogue env begin fun () ->
-          if env.f.fun_contains_calls then
+          if env.f.fun_frame_required then
             `	ldr	lr, [sp, #{emit_int (-4)}]\n`;
           `	bx	{emit_reg i.arg.(0)}\n`; 2
         end
@@ -509,7 +699,7 @@ let emit_instr env i =
           `	b	{emit_label env.f.fun_tailrec_entry_point_label}\n`; 1
         end else begin
           output_epilogue env begin fun () ->
-            if env.f.fun_contains_calls then
+            if env.f.fun_frame_required then
               `	ldr	lr, [sp, #{emit_int (-4)}]\n`;
             `	{emit_jump func}\n`; 2
           end
@@ -629,6 +819,30 @@ let emit_instr env i =
     | Lop(Iintop(Icomp cmp)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         1 + emit_set_condition cmp i.res.(0)
+    | Lop(Icompf cmp) ->
+        let compthen = name_for_float_comparison cmp in
+        let compelse = name_for_float_comparison (Cmm.negate_float_comparison cmp) in
+        `	fcmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+        `	fmstat\n`;
+        let rd = i.res.(0) in
+        if !arch < ARMv8 || not !thumb then begin
+          `	ite	{emit_string compthen}\n`;
+          `	mov{emit_string compthen}	{emit_reg rd}, #1\n`;
+          `	mov{emit_string compelse}	{emit_reg rd}, #0\n`;
+          5
+        end else begin
+          let temp =
+            match rd.loc with
+            | Reg r when r < 8 -> rd
+            | _ -> phys_reg 3 in
+          `	it	{emit_string compthen}\n`;
+          `	mov{emit_string compthen}	{emit_reg temp}, #1\n`;
+          `	it	{emit_string compelse}\n`;
+          `	mov{emit_string compelse}	{emit_reg temp}, #0\n`;
+          if temp.loc = rd.loc then 6 else begin
+            `	movs	{emit_reg rd}, {emit_reg temp}\n`; 7
+          end
+        end
     | Lop(Iintop_imm(Icomp cmp, n)) ->
         `	cmp	{emit_reg i.arg.(0)}, #{emit_int n}\n`;
         1 + emit_set_condition cmp i.res.(0)
@@ -727,8 +941,16 @@ let emit_instr env i =
             assert false
         end
     | Lop (Idls_get) ->
-        (* Here to maintain build *)
-        assert false
+        (* Load domain-local state root pointer *)
+        let offset = Domainstate.(idx_of_field Domain_dls_root) * 8 in
+        `	ldr	{emit_reg i.res.(0)}, [domain_state_ptr, #{emit_int offset}]\n`; 1
+    | Lop(Ireturn_addr) ->
+        let n = frame_size env in
+        if env.f.fun_frame_required then begin
+          `	ldr	{emit_reg i.res.(0)}, [sp, #{emit_int (n-4)}]\n`; 1
+        end else begin
+          `	mov	{emit_reg i.res.(0)}, lr\n`; 1
+        end
     | Lreloadretaddr ->
         let n = frame_size env in
         `	ldr	lr, [sp, #{emit_int(n-4)}]\n`; 1
@@ -869,18 +1091,6 @@ let emit_instr env i =
           `	pop	\{trap_ptr, pc}\n`; 2
         end
 
-(* Upper bound on the size of the code sequence for a Linear instruction,
-   in 32-bit words. *)
-
-let max_instruction_size i =
-  match i.desc with
-  | Lswitch jumptbl ->
-      if !arch > ARMv6 && !thumb
-      then 1 + (Array.length jumptbl + 1) / 2 + Array.length jumptbl
-      else 2 + Array.length jumptbl
-  | _ ->
-      8   (* conservative upper bound; the true upper bound is probably 5 *)
-
 (* Emission of an instruction sequence *)
 
 let rec emit_all env ninstr fallthrough i =
@@ -893,7 +1103,7 @@ let rec emit_all env ninstr fallthrough i =
     let limit = (if !fpu >= VFPv2 && env.float_literals <> []
                  then 127
                  else 511) in
-    let limit = limit - env.size_literals - max_instruction_size i in
+    let limit = limit - env.size_literals - max_instruction_size i.desc in
     let ninstr' =
       if ninstr >= limit - 64 && not fallthrough then begin
         emit_literals env;
