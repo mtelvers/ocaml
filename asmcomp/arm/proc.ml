@@ -23,10 +23,6 @@ open Reg
 open Arch
 open Mach
 
-(* Instruction selection *)
-
-let word_addressed = false
-
 (* Registers available for register allocation *)
 
 (* Integer register map:
@@ -341,18 +337,6 @@ let max_register_pressure = function
   | Iload { memory_chunk = Single; _ } | Istore(Single, _, _) -> [| 9; 15; 31 |]
   | Iintop Imulh when !arch < ARMv6 -> [| 8; 16; 32 |]
   | _ -> [| 9; 16; 32 |]
-
-(* Layout of the stack *)
-
-let frame_required fd =
-  let num_stack_slots = fd.fun_num_stack_slots in
-  fd.fun_contains_calls
-    || num_stack_slots.(0) > 0
-    || num_stack_slots.(1) > 0
-    || num_stack_slots.(2) > 0
-
-let prologue_required fd =
-  frame_required fd
 
 (* Calling the assembler *)
 
