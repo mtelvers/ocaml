@@ -3044,12 +3044,8 @@ asmcomp/cmmgen.cmx : \
     middle_end/clambda_primitives.cmx \
     middle_end/clambda.cmx \
     middle_end/backend_var.cmx \
-<<<<<<< HEAD
     parsing/asttypes.cmx \
-=======
-    parsing/asttypes.cmi \
     asmcomp/arch.cmx \
->>>>>>> ba204850ad (Revert "Remove arm, i386 native-code backends (#11904)")
     asmcomp/afl_instrument.cmx \
     asmcomp/cmmgen.cmi
 asmcomp/cmmgen.cmi : \
