@@ -438,51 +438,83 @@ CAMLexport value caml_copy_int64(int64_t i)
   return res;
 }
 
-CAMLprim value caml_int64_neg(value v)
-{ return caml_copy_int64(- Int64_val(v)); }
+/* Int64 operations - forward declarations for both boxed and native versions */
+CAMLprim value caml_int64_neg(value v);
+CAMLprim value caml_int64_add(value v1, value v2);
+CAMLprim value caml_int64_sub(value v1, value v2);
+CAMLprim value caml_int64_mul(value v1, value v2);
+CAMLprim value caml_int64_div(value v1, value v2);
+CAMLprim value caml_int64_mod(value v1, value v2);
+CAMLprim value caml_int64_and(value v1, value v2);
+CAMLprim value caml_int64_or(value v1, value v2);
+CAMLprim value caml_int64_xor(value v1, value v2);
+/* Native (unboxed) int64 operations for 32-bit platforms */
+CAMLprim int64_t caml_int64_neg_native(int64_t i);
+CAMLprim int64_t caml_int64_add_native(int64_t i1, int64_t i2);
+CAMLprim int64_t caml_int64_sub_native(int64_t i1, int64_t i2);
+CAMLprim int64_t caml_int64_mul_native(int64_t i1, int64_t i2);
+CAMLprim int64_t caml_int64_div_native(int64_t dividend, int64_t divisor);
+CAMLprim int64_t caml_int64_mod_native(int64_t dividend, int64_t divisor);
+CAMLprim int64_t caml_int64_and_native(int64_t i1, int64_t i2);
+CAMLprim int64_t caml_int64_or_native(int64_t i1, int64_t i2);
+CAMLprim int64_t caml_int64_xor_native(int64_t i1, int64_t i2);
 
-CAMLprim value caml_int64_add(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) + Int64_val(v2)); }
 
-CAMLprim value caml_int64_sub(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) - Int64_val(v2)); }
+#define CAMLprim_int64_1(name)                                          \
+  CAMLprim int64_t caml_int64_##name##_native(int64_t);                 \
+                                                                        \
+  CAMLprim value caml_int64_##name(value v)                             \
+  { return caml_copy_int64(caml_int64_##name##_native(Int64_val(v))); } \
+                                                                        \
+  CAMLprim int64_t caml_int64_##name##_native
 
-CAMLprim value caml_int64_mul(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) * Int64_val(v2)); }
+#define CAMLprim_int64_2(name)                                          \
+  CAMLprim int64_t caml_int64_##name##_native(int64_t, int64_t);        \
+                                                                        \
+  CAMLprim value caml_int64_##name(value v1, value v2)                  \
+  { return caml_copy_int64(caml_int64_##name##_native(Int64_val(v1),    \
+                                                      Int64_val(v2))); } \
+                                                                        \
+  CAMLprim int64_t caml_int64_##name##_native
 
-CAMLprim value caml_int64_div(value v1, value v2)
+CAMLprim_int64_1(neg)(int64_t i)
+{ return -i; }
+
+CAMLprim_int64_2(add)(int64_t i1, int64_t i2)
+{ return i1 + i2; }
+
+CAMLprim_int64_2(sub)(int64_t i1, int64_t i2)
+{ return i1 - i2; }
+
+CAMLprim_int64_2(mul)(int64_t i1, int64_t i2)
+{ return i1 * i2; }
+
+CAMLprim_int64_2(div)(int64_t dividend, int64_t divisor)
 {
-  int64_t dividend = Int64_val(v1);
-  int64_t divisor = Int64_val(v2);
   if (divisor == 0) caml_raise_zero_divide();
   /* PR#4740: on some processors, division crashes on overflow.
      Implement the same behavior as for type "int". */
-  if (dividend == INT64_MIN && divisor == -1) return v1;
-  return caml_copy_int64(dividend / divisor);
+  if (dividend == INT64_MIN && divisor == -1) return dividend;
+  return dividend / divisor;
 }
 
-CAMLprim value caml_int64_mod(value v1, value v2)
+CAMLprim_int64_2(mod)(int64_t dividend, int64_t divisor)
 {
-  int64_t dividend = Int64_val(v1);
-  int64_t divisor = Int64_val(v2);
   if (divisor == 0) caml_raise_zero_divide();
   /* PR#4740: on some processors, division crashes on overflow.
      Implement the same behavior as for type "int". */
-  if (dividend == INT64_MIN && divisor == -1){
-    return caml_copy_int64(0);
-  }
-  return caml_copy_int64(dividend % divisor);
+  if (dividend == INT64_MIN && divisor == -1) return 0;
+  return dividend % divisor;
 }
 
-CAMLprim value caml_int64_and(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) & Int64_val(v2)); }
+CAMLprim_int64_2(and)(int64_t i1, int64_t i2)
+{ return i1 & i2; }
 
-CAMLprim value caml_int64_or(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) | Int64_val(v2)); }
+CAMLprim_int64_2(or)(int64_t i1, int64_t i2)
+{ return i1 | i2; }
 
-CAMLprim value caml_int64_xor(value v1, value v2)
-{ return caml_copy_int64(Int64_val(v1) ^ Int64_val(v2)); }
-
+CAMLprim_int64_2(xor)(int64_t i1, int64_t i2)
+{ return i1 ^ i2; }
 CAMLprim value caml_int64_shift_left(value v1, value v2)
 { return caml_copy_int64(Int64_val(v1) << Int_val(v2)); }
 
