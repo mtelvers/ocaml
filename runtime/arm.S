@@ -129,7 +129,7 @@ caml_hot.code_end:
 #include "../runtime/caml/domain_state.tbl"
 #undef DOMAIN_STATE
 
-#define Caml_state(var) [domain_state_ptr, 4*domain_field_caml_##var]
+#define Caml_state(var) [domain_state_ptr, 8*domain_field_caml_##var]
 
 /* Stack switching operations */
 
