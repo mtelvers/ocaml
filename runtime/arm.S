@@ -642,8 +642,9 @@ FUNCTION(caml_perform)
         ldr     r5, Caml_state(current_stack)
         SWITCH_OCAML_STACKS r5, r6
     /*  No parent stack. Raise Unhandled. */
-        ldr     r0, =caml_exn_Unhandled
-        b       caml_raise_exn
+    /* r0 already contains the effect to raise */
+        ldr     r7, =caml_raise_unhandled_effect
+        b       caml_c_call
         CFI_ENDPROC
         .size   caml_perform, .-caml_perform
 
@@ -681,8 +682,8 @@ FUNCTION(caml_resume)
         SWITCH_OCAML_STACKS r5, r0
         mov     r0, r2
         bx      r3
-2:      ldr     r0, =caml_exn_Continuation_already_taken
-        b       caml_raise_exn
+2:      ldr     r7, =caml_raise_continuation_already_resumed
+        b       caml_c_call
         CFI_ENDPROC
         .size   caml_resume, .-caml_resume
 
