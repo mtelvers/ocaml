@@ -46,6 +46,8 @@ EOF
 sed -n \
   -e '/^CAMLprim value .*)/p' \
   -e '/^CAMLprim value [^)]*$/,/)/p' \
+  -e '/^CAMLprim int64_t .*)/p' \
+  -e '/^CAMLprim int64_t [^)]*$/,/)/p' \
   "$@" |
 # Transform these definitions into "CAMLextern" declarations
 sed \
