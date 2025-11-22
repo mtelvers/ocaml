@@ -150,11 +150,16 @@ caml_hot.code_end:
 #define Handler_effect(reg)     [reg, #8]
 #define Handler_parent(reg)     [reg, #12]
 
-/* Switch from OCaml to C stack. */
+/* Switch from OCaml to C stack.
+   Callers must have done push {r4, lr} before invoking this macro.
+   We save sp+4 (address of saved lr) to Stack_sp for GC stack scanning,
+   but save actual sp to Cstack_sp for restoration. */
 .macro SWITCH_OCAML_TO_C
     /* Fill in Caml_state->current_stack->sp */
+    /* Use sp+4 (address of saved lr) so GC scanning finds correct return addr */
         ldr     r5, Caml_state(current_stack)
-        str     sp, Stack_sp(r5)
+        add     r6, sp, #4
+        str     r6, Stack_sp(r5)
     /* Fill in Caml_state->c_stack */
         ldr     r6, Caml_state(c_stack)
         str     r5, Cstack_stack(r6)

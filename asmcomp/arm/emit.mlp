@@ -50,8 +50,8 @@ let emit_reg = function
   | _ -> fatal_error "Emit_arm.emit_reg"
 
 (* Physical registers for stack arguments *)
-let reg_stack_arg_begin = phys_reg 4  (* r4 *)
-let reg_stack_arg_end = phys_reg 5    (* r5 *)
+let reg_stack_arg_begin = "r9"   (* matches arm.S expectation *)
+let reg_stack_arg_end = "r12"   (* matches arm.S expectation *)
 
 let initial_stack_offset f =
   4 * f.fun_num_stack_slots.(0) +
@@ -707,8 +707,8 @@ let emit_instr env i =
     | Lop(Iextcall {func; alloc; stack_ofs}) ->
         if stack_ofs > 0 then begin
           (* Stack-passing external call with multicore support *)
-          `	mov	{emit_reg reg_stack_arg_begin}, sp\n`;
-          `	add	{emit_reg reg_stack_arg_end}, sp, #{emit_int (Misc.align stack_ofs 8)}\n`;
+          `	mov	{emit_string reg_stack_arg_begin}, sp\n`;
+          `	add	{emit_string reg_stack_arg_end}, sp, #{emit_int (Misc.align stack_ofs 8)}\n`;
           let ninstr = emit_load_symbol_addr env (phys_reg 7 (* r7 *)) func in
           `	{emit_call "caml_c_call_stack_args"}\n`;
           `{record_frame env i.live (Dbg_other i.dbg)}\n`;
@@ -720,12 +720,12 @@ let emit_instr env i =
           1 + ninstr
         end else begin
           (* No-alloc call: save OCaml stack in a callee-saved register
-             NB: r4 is callee-saved, so we don't need to preserve it *)
+             NB: r4 is marked as destroyed at noalloc calls in proc.ml *)
           `	mov	r4, sp\n`;
           (* Load C stack from domain state *)
           let offset = Domainstate.(idx_of_field Domain_c_stack) * 8 in
-          `	ldr	r5, [domain_state_ptr, #{emit_int offset}]\n`;
-          `	mov	sp, r5\n`;
+          `	ldr	r12, [domain_state_ptr, #{emit_int offset}]\n`;
+          `	mov	sp, r12\n`;
           `	{emit_call func}\n`;
           (* Restore OCaml stack *)
           `	mov	sp, r4\n`;
@@ -775,7 +775,7 @@ let emit_instr env i =
             end else begin
               (* ARMv6 and earlier use ldr + CP15 memory barrier *)
               `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
-              `	mcr	p15, 0, r0, c7, c10, 5\n`; 2
+              `	mcr	p15, 0, r12, c7, c10, 5\n`; 2
             end
         | _ ->
             let instr =
@@ -824,7 +824,7 @@ let emit_instr env i =
                   `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
                 end else begin
                   (* ARMv6 and earlier use CP15 memory barrier + str *)
-                  `	mcr	p15, 0, r0, c7, c10, 5\n`;
+                  `	mcr	p15, 0, r12, c7, c10, 5\n`;
                   `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
                 end
               end else begin

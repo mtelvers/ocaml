@@ -281,14 +281,14 @@ let destroyed_at_c_noalloc_call =
   Array.of_list (List.map
                    phys_reg
                    (match abi with
-                      EABI ->       (* r4-r7 preserved *)
-                        [0;1;2;3;8;
+                      EABI ->       (* r5-r7 preserved, r4 used by emit.mlp *)
+                        [0;1;2;3;4;8;
                          100;101;102;103;104;105;106;107;
                          108;109;110;111;112;113;114;115;
                          116;117;118;119;120;121;122;123;
                          124;125;126;127;128;129;130;131]
-                    | EABI_HF ->    (* r4-r7, d8-d15 preserved *)
-                        [0;1;2;3;8;
+                    | EABI_HF ->    (* r5-r7, d8-d15 preserved, r4 used by emit.mlp *)
+                        [0;1;2;3;4;8;
                          100;101;102;103;104;105;106;107;
                          116;117;118;119;120;121;122;123;
                          124;125;126;127;128;129;130;131]))
