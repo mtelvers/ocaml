@@ -182,13 +182,26 @@ caml_hot.code_end:
     /* First, save the young_ptr & exn_handler */
         str     alloc_ptr, Caml_state(young_ptr)
         str     trap_ptr, Caml_state(exn_handler)
+    /* Save r5, r6 to stack first since we need them as scratch */
+        push    {r5, r6}
     /* Now, use r5 to point to the gc_regs bucket */
         ldr     r5, Caml_state(gc_regs_buckets)
         ldr     r6, [r5, 0] /* next ptr */
         str     r6, Caml_state(gc_regs_buckets)
     /* Save allocatable integer registers */
-        add     r6, r5, #4
-        stm     r6, {r0-r7,r12}
+    /* Layout: [r5+4]=r0, [r5+8]=r1, ..., [r5+20]=r4, [r5+24]=r5, [r5+28]=r6, [r5+32]=r7, [r5+36]=r12 */
+        str     r0, [r5, #4]
+        str     r1, [r5, #8]
+        str     r2, [r5, #12]
+        str     r3, [r5, #16]
+        str     r4, [r5, #20]
+    /* Save ORIGINAL r5, r6 from stack */
+        ldr     r6, [sp, #0]
+        str     r6, [r5, #24]
+        ldr     r6, [sp, #4]
+        str     r6, [r5, #28]
+        str     r7, [r5, #32]
+        str     r12, [r5, #36]
 #if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
     /* Save caller-save floating-point registers */
         add     r6, r5, #40
@@ -196,6 +209,8 @@ caml_hot.code_end:
 #endif
         add     r5, r5, #4
         str     r5, Caml_state(gc_regs)
+    /* Clean up stack */
+        add     sp, sp, #8
 .endm
 
 /* Undo SAVE_ALL_REGS by loading the registers saved in Caml_state(gc_regs)
@@ -204,17 +219,21 @@ caml_hot.code_end:
     /* Restore registers */
         ldr     r5, Caml_state(gc_regs)
         sub     r5, r5, #4
-        add     r6, r5, #4
-        ldm     r6, {r0-r7,r12}
+    /* Save bucket pointer to stack before ldm clobbers r5 */
+        push    {r5}
 #if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
-    /* Restore floating-point registers */
+    /* Restore floating-point registers BEFORE ldm (so r6 isn't clobbered) */
         add     r6, r5, #40
         vldm    r6, {d0-d7}
 #endif
+        add     r6, r5, #4
+        ldm     r6, {r0-r7,r12}
     /* Put gc_regs struct back in bucket linked list */
-        ldr     r6, Caml_state(gc_regs_buckets)
-        str     r6, [r5, 0]  /* next ptr */
-        str     r5, Caml_state(gc_regs_buckets)
+    /* Use alloc_ptr/trap_ptr as temps since they get reloaded below */
+        pop     {alloc_ptr}     /* alloc_ptr = bucket pointer */
+        ldr     trap_ptr, Caml_state(gc_regs_buckets)
+        str     trap_ptr, [alloc_ptr, 0]  /* bucket->next = list head */
+        str     alloc_ptr, Caml_state(gc_regs_buckets)  /* list head = bucket */
     /* Reload new allocation pointer & exn handler */
         ldr     alloc_ptr, Caml_state(young_ptr)
         ldr     trap_ptr, Caml_state(exn_handler)
@@ -543,7 +562,7 @@ FUNCTION(caml_raise_exception)
     /* Discard the C stack pointer and reset to ocaml stack */
         ldr     r5, Caml_state(current_stack)
         ldr     r5, Stack_sp(r5)
-        mov     sp, r5
+        sub     sp, r5, #4      /* undo the +4 to get actual frame for pop */
     /* Restore frame and link on return to OCaml */
         pop     {r4, lr}
         b       caml_raise_exn
@@ -595,18 +614,21 @@ FUNCTION(caml_callback3_asm)
 
 /* Fibers */
 
-/* Switch between OCaml stacks. Clobbers r5 and switches TRAP_PTR
+/* Switch between OCaml stacks. Clobbers r5, r12 and switches TRAP_PTR
    Preserves old_stack and new_stack registers */
 .macro SWITCH_OCAML_STACKS old_stack, new_stack
     /* Save frame pointer and return address for old_stack */
         push    {r4, lr}; CFI_ADJUST(8)
     /* Save OCaml SP and exn_handler in the stack info */
-        str     sp, Stack_sp(\old_stack)
+    /* Use sp+4 (address of saved lr) so GC scanning finds correct return addr */
+    /* Use r12 as scratch to avoid clobbering old_stack if it's r5 */
+        add     r12, sp, #4
+        str     r12, Stack_sp(\old_stack)
         str     trap_ptr, Stack_exception(\old_stack)
     /* switch stacks */
         str     \new_stack, Caml_state(current_stack)
         ldr     r5, Stack_sp(\new_stack)
-        mov     sp, r5
+        sub     sp, r5, #4      /* undo the +4 to get actual frame for pop */
     /* restore exn_handler for new stack */
         ldr     trap_ptr, Stack_exception(\new_stack)
     /* Restore frame pointer and return address for new_stack */
@@ -704,7 +726,9 @@ FUNCTION(caml_runstack)
         ldr     r3, [r1]   /* code pointer */
     /*  save old stack pointer and exception handler */
         ldr     r4, Caml_state(current_stack) /* r4 := old stack */
-        str     sp, Stack_sp(r4)
+    /* Use sp+4 (address of saved lr) so GC scanning finds correct return addr */
+        add     r5, sp, #4
+        str     r5, Stack_sp(r4)
         str     trap_ptr, Stack_exception(r4)
     /* Load new stack pointer and set parent */
         ldr     r5, Stack_handler(r0)
@@ -746,7 +770,7 @@ FUNCTION(caml_runstack)
     /* switch directly to parent stack with correct return */
         mov     r0, r6
         mov     r1, r7
-        mov     sp, r8
+        sub     sp, r8, #4      /* undo the +4 to get actual frame for pop */
         ldr     r5, [r7]  /* code pointer */
     /* Invoke handle_value (or handle_exn) */
         pop     {r4, lr}
