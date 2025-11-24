@@ -263,10 +263,14 @@ FUNCTION(caml_call_realloc_stack)
         beq     1f
         RESTORE_ALL_REGS
     /* Free stack space and return to caller */
-        pop     {r4, pc}
+    /* Don't restore r4 from stack - RESTORE_ALL_REGS already did it from gc_regs */
+        add     sp, sp, #4
+        pop     {pc}
 1:      RESTORE_ALL_REGS
     /* Raise the Stack_overflow exception */
-        pop     {r4, lr}
+    /* Don't restore r4 from stack - RESTORE_ALL_REGS already did it from gc_regs */
+        add     sp, sp, #4
+        pop     {lr}
         add     sp, sp, #4 /* pop argument */
         ldr     r0, =caml_exn_Stack_overflow
         b       caml_raise_exn
@@ -291,7 +295,9 @@ FUNCTION(caml_call_gc)
         SWITCH_C_TO_OCAML
         RESTORE_ALL_REGS
     /* Free stack space and return to caller */
-        pop     {r4, pc}
+    /* Don't restore r4 from stack - RESTORE_ALL_REGS already did it from gc_regs */
+        add     sp, sp, #4
+        pop     {pc}
         CFI_ENDPROC
         .size   caml_call_gc, .-caml_call_gc
 
