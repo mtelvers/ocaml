@@ -1,4 +1,5 @@
 (* TEST
+ arch64;
  ocamlrunparam += ",d=129";
  { native; }
 *)
