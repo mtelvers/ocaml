@@ -50,8 +50,8 @@ let emit_reg = function
   | _ -> fatal_error "Emit_arm.emit_reg"
 
 (* Physical registers for stack arguments *)
-let reg_stack_arg_begin = phys_reg 4  (* r4 *)
-let reg_stack_arg_end = phys_reg 5    (* r5 *)
+let reg_stack_arg_begin = "r9"   (* matches arm.S expectation *)
+let reg_stack_arg_end = "r12"   (* matches arm.S expectation *)
 
 let initial_stack_offset f =
   4 * f.fun_num_stack_slots.(0) +
@@ -510,7 +510,8 @@ module BR = Branch_relaxation.Make (struct
     | Lop (Iload _) -> 3
     | Lop (Istore _) -> 3
     | Lop (Ialloc _) -> 5
-    | Lop (Ipoll _) -> 3
+    | Lop (Ipoll {return_label=None}) -> 3
+    | Lop (Ipoll {return_label=Some _}) -> 4
     | Lop (Iintop (Icomp _)) -> 2
     | Lop (Iintop_imm (Icomp _, _)) -> 2
     | Lop (Iintop (Icheckbound)) -> 2
@@ -704,13 +705,33 @@ let emit_instr env i =
             `	{emit_jump func}\n`; 2
           end
         end
-    | Lop(Iextcall { func; alloc = false; }) ->
-        `	{emit_call func}\n`; 1
-    | Lop(Iextcall { func; alloc = true; }) ->
-        let ninstr = emit_load_symbol_addr env (phys_reg 7 (* r7 *)) func in
-        `	{emit_call "caml_c_call"}\n`;
-        `{record_frame env i.live (Dbg_other i.dbg)}\n`;
-        1 + ninstr
+    | Lop(Iextcall {func; alloc; stack_ofs}) ->
+        if stack_ofs > 0 then begin
+          (* Stack-passing external call with multicore support *)
+          `	mov	{emit_string reg_stack_arg_begin}, sp\n`;
+          `	add	{emit_string reg_stack_arg_end}, sp, #{emit_int (Misc.align stack_ofs 8)}\n`;
+          let ninstr = emit_load_symbol_addr env (phys_reg 7 (* r7 *)) func in
+          `	{emit_call "caml_c_call_stack_args"}\n`;
+          `{record_frame env i.live (Dbg_other i.dbg)}\n`;
+          3 + ninstr
+        end else if alloc then begin
+          let ninstr = emit_load_symbol_addr env (phys_reg 7 (* r7 *)) func in
+          `	{emit_call "caml_c_call"}\n`;
+          `{record_frame env i.live (Dbg_other i.dbg)}\n`;
+          1 + ninstr
+        end else begin
+          (* No-alloc call: save OCaml stack in a callee-saved register
+             NB: r4 is marked as destroyed at noalloc calls in proc.ml *)
+          `	mov	r4, sp\n`;
+          (* Load C stack from domain state *)
+          let offset = Domainstate.(idx_of_field Domain_c_stack) * 8 in
+          `	ldr	r12, [domain_state_ptr, #{emit_int offset}]\n`;
+          `	mov	sp, r12\n`;
+          `	{emit_call func}\n`;
+          (* Restore OCaml stack *)
+          `	mov	sp, r4\n`;
+          5
+        end
     | Lop(Istackoffset n) ->
         assert (n mod 8 = 0);
         let ninstr = emit_stack_adjustment (-n) in
@@ -738,17 +759,36 @@ let emit_instr env i =
               `	ldr	{emit_reg i.res.(0)}, {emit_addressing addressing_mode i.arg 0}\n`
             end; 2
         end
-    | Lop(Iload { memory_chunk; addressing_mode; _ }) ->
+    | Lop(Iload { memory_chunk; addressing_mode; is_atomic }) ->
+        assert(memory_chunk = Word_int || memory_chunk = Word_val || is_atomic = false);
         let r = i.res.(0) in
-        let instr =
-          match memory_chunk with
-            Byte_unsigned -> "ldrb"
-          | Byte_signed -> "ldrsb"
-          | Sixteen_unsigned -> "ldrh"
-          | Sixteen_signed -> "ldrsh"
-          | Double -> "fldd"
-          | _ (* 32-bit quantities *) -> "ldr" in
-        `	{emit_string instr}	{emit_reg r}, {emit_addressing addressing_mode i.arg 0}\n`; 1
+        begin match memory_chunk with
+        | Word_int | Word_val when is_atomic ->
+            (* Atomic load: use acquire semantics with memory barrier *)
+            assert (addressing_mode = Iindexed 0);
+            if !arch >= ARMv8 then begin
+              (* ARMv8 has load-acquire instruction *)
+              `	ldar	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`; 1
+            end else if !arch >= ARMv7 then begin
+              (* ARMv7 uses ldr + dmb for acquire semantics *)
+              `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
+              `	dmb	ish\n`; 2
+            end else begin
+              (* ARMv6 and earlier use ldr + CP15 memory barrier *)
+              `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
+              `	mcr	p15, 0, r12, c7, c10, 5\n`; 2
+            end
+        | _ ->
+            let instr =
+              match memory_chunk with
+                Byte_unsigned -> "ldrb"
+              | Byte_signed -> "ldrsb"
+              | Sixteen_unsigned -> "ldrh"
+              | Sixteen_signed -> "ldrsh"
+              | Double -> "fldd"
+              | _ (* 32-bit quantities *) -> "ldr" in
+            `	{emit_string instr}	{emit_reg r}, {emit_addressing addressing_mode i.arg 0}\n`; 1
+        end
     | Lop(Istore(Single, addr, _)) when !fpu >= VFPv2 ->
         `	fcvtsd	s14, {emit_reg i.arg.(0)}\n`;
         `	fsts	s14, {emit_addressing addr i.arg 1}\n`; 2
@@ -766,17 +806,45 @@ let emit_instr env i =
             `	str	{emit_reg i.arg.(0)}, {emit_addressing addr i.arg 2}\n`;
             `	str	{emit_reg i.arg.(1)}, {emit_addressing addr' i.arg 2}\n`; 2
         end
-    | Lop(Istore(size, addr, _)) ->
+    | Lop(Istore(size, addr, assignment)) ->
+        (* NB: assignments other than Word_int and Word_val do not follow the
+           Multicore OCaml memory model and so do not emit a barrier *)
         let r = i.arg.(0) in
-        let instr =
-          match size with
-            Byte_unsigned
-          | Byte_signed -> "strb"
-          | Sixteen_unsigned
-          | Sixteen_signed -> "strh"
-          | Double -> "fstd"
-          | _ (* 32-bit quantities *) -> "str" in
-        `	{emit_string instr}	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 1
+        begin match size with
+        | Word_int | Word_val ->
+            (* Memory model barrier for non-initializing store *)
+            let ninstr =
+              if assignment then begin
+                if !arch >= ARMv8 then begin
+                  (* ARMv8 has store-release instruction *)
+                  assert (addr = Iindexed 0);
+                  `	stlr	{emit_reg r}, [{emit_reg i.arg.(1)}]\n`; 1
+                end else if !arch >= ARMv7 then begin
+                  (* ARMv7 uses dmb + str for release semantics *)
+                  `	dmb	ish\n`;
+                  `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
+                end else begin
+                  (* ARMv6 and earlier use CP15 memory barrier + str *)
+                  `	mcr	p15, 0, r12, c7, c10, 5\n`;
+                  `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
+                end
+              end else begin
+                (* Initializing store, no barrier needed *)
+                `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 1
+              end
+            in
+            ninstr
+        | _ ->
+            let instr =
+              match size with
+                Byte_unsigned
+              | Byte_signed -> "strb"
+              | Sixteen_unsigned
+              | Sixteen_signed -> "strh"
+              | Double -> "fstd"
+              | _ -> "str" in
+            `	{emit_string instr}	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 1
+        end
     | Lop(Ialloc { bytes = n; dbginfo }) ->
         let lbl_frame =
           record_frame_label env i.live (Dbg_alloc dbginfo)
@@ -787,7 +855,7 @@ let emit_instr env i =
                          (fun i ->
                            `   sub     alloc_ptr, alloc_ptr, #{emit_int32 i}\n`) in
           let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
-          `	ldr	{emit_reg i.res.(0)}, [domain_state_ptr, {emit_int offset}]\n`;
+          `	ldr	{emit_reg i.res.(0)}, [domain_state_ptr, #{emit_int offset}]\n`;
           `     cmp     alloc_ptr, {emit_reg i.res.(0)}\n`;
           let lbl_call_gc = new_label() in
           `     bcc     {emit_label lbl_call_gc}\n`;
@@ -812,9 +880,29 @@ let emit_instr env i =
           1 + ninstr
         end
     | Lop(Ipoll { return_label }) ->
+        let lbl_frame = record_frame_label env i.live (Dbg_alloc []) in
+        let lbl_call_gc = new_label() in
+        let lbl_after_poll = match return_label with
+          | None -> new_label()
+          | Some lbl -> lbl in
+        let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
+        `	ldr	r12, [domain_state_ptr, #{emit_int offset}]\n`;
+        `	cmp	alloc_ptr, r12\n`;
         begin match return_label with
-          None -> 0
-        | Some lbl -> `     b    {emit_label lbl}\n`; 1
+        | None ->
+            `	bls	{emit_label lbl_call_gc}\n`;
+            `{emit_label lbl_after_poll}:\n`
+        | Some lbl ->
+            `	bhi	{emit_label lbl}\n`;
+            `	b	{emit_label lbl_call_gc}\n`
+        end;
+        env.call_gc_sites <-
+          { gc_lbl = lbl_call_gc;
+            gc_return_lbl = lbl_after_poll;
+            gc_frame_lbl = lbl_frame; } :: env.call_gc_sites;
+        begin match return_label with
+        | None -> 3
+        | Some _ -> 4
         end
     | Lop(Iintop(Icomp cmp)) ->
         `	cmp	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
@@ -1078,13 +1166,10 @@ let emit_instr env i =
     | Lraise k ->
         begin match k with
         | Lambda.Raise_regular ->
-          let offset = Domainstate.(idx_of_field Domain_backtrace_pos) * 8 in
-          `	mov	r12, #0\n`;
-          `	str	r12, [domain_state_ptr, {emit_int offset}]\n`;
           `	{emit_call "caml_raise_exn"}\n`;
-          `{record_frame env Reg.Set.empty (Dbg_raise i.dbg)}\n`; 3
+          `{record_frame env Reg.Set.empty (Dbg_raise i.dbg)}\n`; 1
         | Lambda.Raise_reraise ->
-          `	{emit_call "caml_raise_exn"}\n`;
+          `	{emit_call "caml_reraise_exn"}\n`;
           `{record_frame env Reg.Set.empty (Dbg_raise i.dbg)}\n`; 1
         | Lambda.Raise_notrace ->
           `	mov	sp, trap_ptr\n`;
@@ -1132,9 +1217,49 @@ let fundecl fundecl =
   else
     `	.arm\n`;
   `	.type	{emit_symbol fundecl.fun_name}, %function\n`;
+  (* Dynamic stack checking *)
+  let stack_threshold_size = Config.stack_threshold * 8 in (* bytes *)
+  let max_frame_size = frame_size env + fundecl.fun_extra_stack_used in
+  let handle_overflow, stack_check_size =
+    if fundecl.fun_contains_nontail_calls
+    || max_frame_size >= stack_threshold_size then begin
+      let overflow = new_label () in
+      `{emit_label overflow}:\n`;
+      (* Pass the desired frame size on the stack, since all of the
+         argument-passing registers may be in use. *)
+      let s = (Config.stack_threshold + max_frame_size / 8) in
+      ignore (emit_intconst (phys_reg 8 (* r12 *)) (Int32.of_int s));
+      `	push	\{r12, lr}\n`;
+      `	{emit_call "caml_call_realloc_stack"}\n`;
+      `	pop	\{r12, lr}\n`;
+      (* fall through to function entry point *)
+      Some overflow, 5
+    end else
+      None, 0 in
   `{emit_symbol fundecl.fun_name}:\n`;
   emit_debug_info fundecl.fun_dbg;
   cfi_startproc();
+  begin match handle_overflow with
+  | None -> ()
+  | Some overflow ->
+      let threshold_offset = Domainstate.stack_ctx_words * 8 + stack_threshold_size in
+      let f = max_frame_size + threshold_offset in
+      let offset = Domainstate.(idx_of_field Domain_current_stack) * 8 in
+      `	ldr	r12, [domain_state_ptr, #{emit_int offset}]\n`;
+      (* Add offset to r12 *)
+      ignore (decompose_intconst (Int32.of_int f)
+               (fun bits -> `	add	r12, r12, #{emit_int32 bits}\n`));
+      `	cmp	sp, r12\n`;
+      `	bcc	{emit_label overflow}\n`
+  end;
+  let num_call_gc, num_check_bound =
+    num_call_gc_and_check_bound_points env
+  in
+  let max_out_of_line_code_offset =
+    stack_check_size +
+    max_out_of_line_code_offset ~num_call_gc ~num_check_bound
+  in
+  BR.relax fundecl ~max_out_of_line_code_offset;
   emit_all env 0 true fundecl.fun_body;
   emit_literals env;
   List.iter emit_call_gc env.call_gc_sites;
