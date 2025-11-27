@@ -18,6 +18,7 @@
 /* Must be preprocessed by cpp */
 
 #include "caml/m.h"
+#include "caml/asm.h"
 
         .syntax unified
         .text
@@ -82,22 +83,6 @@
 trap_ptr          .req    r8
 alloc_ptr         .req    r10
 domain_state_ptr  .req    r11
-
-/* Support for CFI directives */
-
-#if defined(ASM_CFI_SUPPORTED)
-#define CFI_STARTPROC .cfi_startproc
-#define CFI_ENDPROC .cfi_endproc
-#define CFI_ADJUST(n) .cfi_adjust_cfa_offset n
-#define CFI_REGISTER(r1,r2) .cfi_register r1,r2
-#define CFI_OFFSET(r,n) .cfi_offset r,n
-#else
-#define CFI_STARTPROC
-#define CFI_ENDPROC
-#define CFI_ADJUST(n)
-#define CFI_REGISTER(r1,r2)
-#define CFI_OFFSET(r,n)
-#endif
 
 #if defined(FUNCTION_SECTIONS)
 #define TEXT_SECTION(name) .section .text.caml.##name,"ax",%progbits
