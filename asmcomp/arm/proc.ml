@@ -277,30 +277,33 @@ let destroyed_at_alloc =            (* r0-r6, d0-d15 preserved *)
                     116;117;118;119;120;121;122;123;
                     124;125;126;127;128;129;130;131])
 
-let destroyed_at_c_call =
+let destroyed_at_c_noalloc_call =
   Array.of_list (List.map
                    phys_reg
                    (match abi with
-                      EABI ->       (* r4-r7 preserved *)
-                        [0;1;2;3;8;
+                      EABI ->       (* r5-r7 preserved, r4 used by emit.mlp *)
+                        [0;1;2;3;4;8;
                          100;101;102;103;104;105;106;107;
                          108;109;110;111;112;113;114;115;
                          116;117;118;119;120;121;122;123;
                          124;125;126;127;128;129;130;131]
-                    | EABI_HF ->    (* r4-r7, d8-d15 preserved *)
-                        [0;1;2;3;8;
+                    | EABI_HF ->    (* r5-r7, d8-d15 preserved, r4 used by emit.mlp *)
+                        [0;1;2;3;4;8;
                          100;101;102;103;104;105;106;107;
                          116;117;118;119;120;121;122;123;
                          124;125;126;127;128;129;130;131]))
 
 let destroyed_at_oper = function
-    Iop(Icall_ind | Icall_imm _)
-  | Iop(Iextcall { alloc = true; _ }) ->
+    Iop(Icall_ind | Icall_imm _) ->
       all_phys_regs
-  | Iop(Iextcall { alloc = false; _}) ->
-      destroyed_at_c_call
+  | Iop(Iextcall {alloc; stack_ofs; }) ->
+      assert (stack_ofs >= 0);
+      if alloc || stack_ofs > 0 then all_phys_regs
+      else destroyed_at_c_noalloc_call
   | Iop(Ialloc _) ->
       destroyed_at_alloc
+  | Iop(Ipoll _) ->
+      [| phys_reg 8 |]  (* r12 destroyed *)
   | Iop(Iconst_symbol _) when !Clflags.pic_code ->
       [| phys_reg 3; phys_reg 8 |]  (* r3 and r12 destroyed *)
   | Iop(Iintop Imulh) when !arch < ARMv6 ->
