@@ -1,0 +1,91 @@
+name: Rebase and Test Backends
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Daily at midnight UTC
+  workflow_dispatch:      # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  rebase-test:
+    runs-on: self-hosted
+    timeout-minutes: 720  # 12 hours (ppc32 is slow)
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: arm32-multicore
+
+      - name: Configure git
+        run: |
+          git config user.name "CI Bot"
+          git config user.email "ci@example.com"
+
+      - name: Fetch upstream trunk
+        run: |
+          git remote add upstream https://github.com/ocaml/ocaml.git || true
+          git fetch upstream trunk
+
+      - name: Drop previous status commit before rebase
+        run: |
+          if [ "$(git log -1 --format=%s)" = "Backend test status" ]; then
+            git reset --hard HEAD~1
+          fi
+
+      - name: Rebase onto trunk
+        id: rebase
+        run: |
+          if git rebase upstream/trunk; then
+            echo "rebase_failed=false" >> $GITHUB_OUTPUT
+          else
+            echo "rebase_failed=true" >> $GITHUB_OUTPUT
+            git rebase --abort
+          fi
+
+      - name: Remove upstream workflows
+        if: steps.rebase.outputs.rebase_failed != 'true'
+        run: |
+          find .github/workflows -name '*.yml' ! -name 'rebase-test.yml' -delete
+          git add .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit --amend --no-edit
+          fi
+
+      - name: Check if already tested
+        if: steps.rebase.outputs.rebase_failed != 'true'
+        id: check
+        run: |
+          new_tree=$(git rev-parse HEAD^{tree})
+          old_tree=$(cat ~/.cache/test-backends-stamp 2>/dev/null || true)
+          if [ "$new_tree" = "$old_tree" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "No changes since last tested. Skipping."
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "new_tree=$new_tree" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and test on remote workers
+        if: steps.rebase.outputs.rebase_failed != 'true' && steps.check.outputs.skip != 'true'
+        run: ~/vms/test-backends.sh "$GITHUB_WORKSPACE"
+
+      - name: Commit backend test status
+        if: steps.rebase.outputs.rebase_failed != 'true' && steps.check.outputs.skip != 'true'
+        run: |
+          git add README.adoc
+          git commit -m "Backend test status"
+
+      - name: Push rebased branch
+        if: steps.rebase.outputs.rebase_failed != 'true' && steps.check.outputs.skip != 'true'
+        run: |
+          git push --force https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git arm32-multicore
+          mkdir -p ~/.cache
+          echo "${{ steps.check.outputs.new_tree }}" > ~/.cache/test-backends-stamp
+
+      - name: Report rebase failure
+        if: steps.rebase.outputs.rebase_failed == 'true'
+        run: |
+          echo "::error::Rebase failed - manual intervention required"
+          exit 1
