@@ -20,8 +20,8 @@
 open Format
 
 type abi = EABI | EABI_HF
-type arch = ARMv4 | ARMv5 | ARMv5TE | ARMv6 | ARMv6T2 | ARMv7 | ARMv8
-type fpu = Soft | VFPv2 | VFPv3_D16 | VFPv3
+type arch = ARMv4 | ARMv5 | ARMv5TE | ARMv6 | ARMv6T2 | ARMv7 | ARMv8 | ARMv8M
+type fpu = Soft | VFPv2 | VFPv3_D16 | VFPv3 | FPv5_SP_D16
 
 let abi =
   match Config.system with
@@ -37,12 +37,14 @@ let string_of_arch = function
   | ARMv6T2 -> "armv6t2"
   | ARMv7   -> "armv7"
   | ARMv8   -> "armv8"
+  | ARMv8M  -> "armv8-m.main"
 
 let string_of_fpu = function
     Soft      -> "soft"
   | VFPv2     -> "vfpv2"
   | VFPv3_D16 -> "vfpv3-d16"
   | VFPv3     -> "vfpv3"
+  | FPv5_SP_D16 -> "fpv5-sp-d16"
 
 (* Machine-specific command-line options *)
 
@@ -72,6 +74,7 @@ let farch spec =
            | "armv6t2"                     -> ARMv6T2
            | "armv7"                       -> ARMv7
            | "armv8"                       -> ARMv8
+           | "armv8-m.main"                -> ARMv8M
            | spec -> raise (Arg.Bad ("wrong '-farch' option: " ^ spec))
   end
 
@@ -81,6 +84,7 @@ let ffpu spec =
           | "vfpv2" when abi = EABI_HF     -> VFPv2
           | "vfpv3-d16" when abi = EABI_HF -> VFPv3_D16
           | "vfpv3" when abi = EABI_HF     -> VFPv3
+          | "fpv5-sp-d16"                  -> FPv5_SP_D16
           | spec -> raise (Arg.Bad ("wrong '-ffpu' option: " ^ spec))
   end
 
