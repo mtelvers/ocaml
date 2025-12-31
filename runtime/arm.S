@@ -32,6 +32,10 @@
         cmp     \reg, #0
         beq     \lbl
         .endm
+#elif defined(SYS_linux_eabihf) && defined(MODEL_armv8m)
+        .arch   armv8-m.main
+        .fpu    softvfp
+        .thumb
 #elif defined(SYS_linux_eabihf)
         .arch   armv7-a
         .fpu    vfpv3-d16
@@ -82,7 +86,8 @@
 
 /* Thumb function entry point marker - needed for correct interworking */
 #if (defined(SYS_linux_eabihf) && !defined(MODEL_armv6)) || \
-    (defined(SYS_netbsd) && defined(MODEL_armv7))
+    (defined(SYS_netbsd) && defined(MODEL_armv7)) || \
+    defined(MODEL_armv8m)
 #define THUMB_FUNC .thumb_func
 #else
 #define THUMB_FUNC
@@ -191,8 +196,8 @@ caml_hot.code_end:
         str     r6, [r5, #28]
         str     r7, [r5, #32]
         str     r12, [r5, #36]
-#if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
-    /* Save caller-save floating-point registers */
+#if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
+    /* Save caller-save floating-point registers (not needed for soft float) */
         add     r6, r5, #40
         vstm    r6, {d0-d7}
 #endif
@@ -210,7 +215,7 @@ caml_hot.code_end:
         sub     r5, r5, #4
     /* Save bucket pointer to stack before ldm clobbers r5 */
         push    {r5}
-#if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
+#if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
     /* Restore floating-point registers BEFORE ldm (so r6 isn't clobbered) */
         add     r6, r5, #40
         vldm    r6, {d0-d7}
@@ -420,13 +425,13 @@ FUNCTION(caml_start_program)
 /* Arguments to the OCaml code are in r0...r3 */
 
 .Ljump_to_caml:
-#if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
-    /* Save callee-save floating-point registers */
+#if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
+    /* Save callee-save floating-point registers (not needed for soft float) */
         vpush   {d8-d15}; CFI_ADJUST(64)
 #endif
     /* Save return address and callee-save registers */
         push    {r4-r8,r10,r11,lr}; CFI_ADJUST(32)      /* 8-byte alignment */
-#if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
+#if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
         CFI_OFFSET(lr, -68)
 #else
         CFI_OFFSET(lr, -4)
@@ -492,8 +497,8 @@ FUNCTION(caml_start_program)
         str     r4, Caml_state(c_stack)
     /* Reload callee-save registers and return address */
         pop     {r4-r8,r10,r11,lr}; CFI_ADJUST(-32)
-#if defined(SYS_linux_eabihf) || defined(SYS_netbsd)
-    /* Reload callee-save floating-point registers */
+#if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
+    /* Reload callee-save floating-point registers (not needed for soft float) */
         vpop    {d8-d15}; CFI_ADJUST(-64)
 #endif
         bx      lr

@@ -2536,3 +2536,32 @@ CAMLprim value caml_recommended_domain_count(value unused)
 
   return (Val_long(n));
 }
+
+/* Helper for bare-metal systems without real backup threads.
+   Returns a pointer to the current domain's lock so blocking
+   operations can handle STW interrupts cooperatively. */
+caml_plat_mutex* caml_get_domain_lock(void)
+{
+  if (domain_self == NULL) return NULL;
+  return &domain_self->domain_lock;
+}
+
+/* Helper for bare-metal systems without real backup threads.
+   Returns the domain state pointer so blocking operations can
+   temporarily set caml_state while handling STW interrupts. */
+void* caml_get_domain_state(void)
+{
+  if (domain_self == NULL) return NULL;
+  return domain_self->state;
+}
+
+/* Bare-metal helper: Reset backup thread state to allow domain respawn.
+   On bare-metal we fake backup threads (no real pthreads), so when a domain
+   terminates the backup_thread_msg is never reset to BT_INIT. This function
+   forces the reset so a new domain can spawn on the same core. */
+void caml_reset_backup_thread_state(void)
+{
+  if (domain_self != NULL) {
+    atomic_store_release(&domain_self->backup_thread_msg, BT_INIT);
+  }
+}
