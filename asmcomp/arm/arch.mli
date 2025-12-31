@@ -19,9 +19,9 @@
 
 type abi = EABI | EABI_HF
 
-type arch = ARMv4 | ARMv5 | ARMv5TE | ARMv6 | ARMv6T2 | ARMv7 | ARMv8
+type arch = ARMv4 | ARMv5 | ARMv5TE | ARMv6 | ARMv6T2 | ARMv7 | ARMv8 | ARMv8M
 
-type fpu = Soft | VFPv2 | VFPv3_D16 | VFPv3
+type fpu = Soft | VFPv2 | VFPv3_D16 | VFPv3 | FPv5_SP_D16
 
 val abi : abi
 
