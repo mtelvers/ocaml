@@ -1670,21 +1670,21 @@ has_native_backend=no
 native_ldflags=""
 AS_CASE([$target],
   [[i[3456]86-*-linux*]],
-    [arch=i386; system=linux],
+    [has_native_backend=yes; arch=i386; system=linux],
   [[i[3456]86-*-freebsd*]],
-    [arch=i386; system=freebsd],
+    [has_native_backend=yes; arch=i386; system=freebsd],
   [[i[3456]86-*-netbsd*]],
-    [arch=i386; system=netbsd],
+    [has_native_backend=yes; arch=i386; system=netbsd],
   [[i[3456]86-*-openbsd*]],
-    [arch=i386; system=openbsd],
+    [has_native_backend=yes; arch=i386; system=openbsd],
   [[i[3456]86-*-haiku*]],
-    [arch=i386; system=beos],
+    [has_native_backend=yes; arch=i386; system=beos],
   [[i[3456]86-w64-mingw32*]],
-    [arch=i386; system=mingw],
+    [has_native_backend=yes; arch=i386; system=mingw],
   [[i[3456]86-*-gnu*]],
-    [arch=i386; system=gnu],
+    [has_native_backend=yes; arch=i386; system=gnu],
   [i686-pc-windows],
-    [arch=i386; system=win32],
+    [has_native_backend=yes; arch=i386; system=win32],
   [x86_64-pc-windows],
     [has_native_backend=yes; arch=amd64; system=win64],
   [[powerpc64le*-*-linux*]],
@@ -1809,7 +1809,7 @@ AS_IF([test x"$arch" = "xarm64"],
    AC_MSG_RESULT([$ocaml_arm64_store])])
 
 AS_CASE([$arch],
-  [amd64],
+  [amd64|i386],
     [arch_specific_SOURCES='$(intel_SOURCES)'],
   [arch_specific_SOURCES=''])
 
@@ -1884,16 +1884,22 @@ AS_IF([test -z "$PARTIALLD"],
 # object files to do so.
 # This issue does not affect amd64 (x86_64), aarch64 (arm64)
 # and s390x (Z systems), since ocamlopt produces PIC object files by default.
-# Currently the problem is known for Alpine Linux on other platforms
+# For i386, the native backend does not generate PIC code, so we disable PIE
+# on all Linux systems to avoid linker warnings about DT_TEXTREL.
+# For other architectures, the problem is known for Alpine Linux
 # (issue #7562), and probably affects all Linux distributions that use
 # the musl standard library and dynamic loader.
-# Other systems have PIE by default but can cope with non-PIC object files,
-# e.g. Ubuntu >= 17.10 for i386, which uses the glibc dynamic loader.
 
 AS_CASE([$arch],
   [amd64|arm64|s390x|none],
     # ocamlopt generates PIC code or doesn't generate code at all
     [],
+  [i386],
+    # i386 does not generate PIC code, disable PIE on Linux
+    [AS_CASE([$target],
+      [*-linux-*],
+        [common_cflags="-no-pie $common_cflags"
+        mkexe_extra_flags="-no-pie $mkexe_extra_flags"])],
   [AS_CASE([$target],
     # expected to match "*-linux-musl" as well as "*-linux-musleabi*"
     [*-linux-musl*],
