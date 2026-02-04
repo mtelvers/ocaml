@@ -64,6 +64,7 @@ let arg b = function
   | Regf x  -> print_reg b string_of_registerf x
   | Mem addr -> arg_mem b addr
   | Mem64_RIP (_, s, displ) -> bprintf b "%s%a(%%rip)" s opt_displ displ
+  | Mem_tls (_, sym) -> bprintf b "%%gs:%s@ntpoff" sym
 
 let rec cst b = function
   | ConstLabel _ | Const _ | ConstThis as c -> scst b c
@@ -80,7 +81,7 @@ and scst b = function
   | ConstSub (c1, c2) -> bprintf b "(%a - %a)" scst c1 scst c2
 
 let typeof = function
-  | Mem {typ; _} | Mem64_RIP (typ, _, _) -> typ
+  | Mem {typ; _} | Mem64_RIP (typ, _, _) | Mem_tls (typ, _) -> typ
   | Reg8L _ | Reg8H _ -> BYTE
   | Reg16 _ -> WORD
   | Reg32 _ -> DWORD

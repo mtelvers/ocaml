@@ -43,7 +43,23 @@
 */
 
 #ifdef TARGET_i386
-#define Saved_return_address(sp) *((intnat *)((sp) - 4))
+/* Size of the gc_regs structure, in words.
+   See i386.S and i386/proc.ml for the indices
+   Bucket layout: [0]=next, [4]=eax, [8]=ebx, [12]=ecx, [16]=edx, [20]=esi, [24]=edi, [28]=ebp */
+#define Wosize_gc_regs (1 /* next */ + 7 /* int regs: eax,ebx,ecx,edx,esi,edi,ebp */)
+#define Saved_return_address_raw(sp) *((intnat *)((sp) - 4))
+/* Callback header layout (16 bytes) with 8-byte trap frames:
+   [0] prev_handler (trap frame part 1)
+   [4] trap_addr (trap frame part 2)
+   [8] gc_regs
+   [12] c_stack_sp
+   When hitting return-to-C frame (LBL(caml_retaddr)), sp points to the base of
+   the callback header (offset 0). The return address was pushed by 'call' just
+   below the header, so Saved_return_address_raw(sp) = *(sp-4) gives the pushed
+   return address. Saved_gc_regs must read from sp+8 to get gc_regs. */
+#define First_frame(sp) ((sp) + 8)
+#define Saved_gc_regs(sp) (*(value **)((sp) + 8))
+#define Stack_header_size 16
 #endif
 
 #ifdef TARGET_power
