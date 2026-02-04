@@ -94,6 +94,9 @@ type arg =
   (** Address of a symbol (absolute address except for call/jmp target
       where it is interpreted as a relative displacement *)
 
+  | Mem_tls of data_type * string
+  (** TLS memory access: %gs:symbol@ntpoff (for local-exec TLS model) *)
+
   | Reg8L of reg64
   | Reg8H of reg8h
   | Reg16 of reg64
