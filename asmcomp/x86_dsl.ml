@@ -46,6 +46,7 @@ let const n = Const (Int64.of_int n)
 let al  = Reg8L RAX
 let ah  = Reg8H AH
 let cl  = Reg8L RCX
+let dl  = Reg8L RDX
 let ax  = Reg16 RAX
 let rax = Reg64 RAX
 let rbx = Reg64 RBX
@@ -78,6 +79,9 @@ let mem64 typ ?(scale = 1) ?base ?sym displ idx =
 
 let mem64_rip typ ?(ofs = 0) s =
   Mem64_RIP (typ, s, ofs)
+
+let mem_tls typ sym =
+  Mem_tls (typ, sym)
 
 module D = struct
   let section segment flags args = directive (Section (segment, flags, args))
