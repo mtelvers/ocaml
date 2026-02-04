@@ -89,7 +89,7 @@ let phys_reg n =
 
 let eax = phys_reg 0
 let ebx = phys_reg 1
-let ecx = phys_reg 2
+let _ecx = phys_reg 2
 let edx = phys_reg 3
 
 let stack_slot slot ty =
@@ -97,7 +97,7 @@ let stack_slot slot ty =
 
 (* Instruction selection *)
 
-let word_addressed = false
+let _word_addressed = false
 
 (* Calling conventions *)
 
@@ -193,18 +193,19 @@ let regs_are_volatile rs =
 
 (* Registers destroyed by operations *)
 
-let destroyed_at_c_call =               (* ebx, esi, edi, ebp preserved *)
-  [|eax; ecx; edx|]
+(* On i386, all external calls (both alloc and noalloc) go through
+   caml_c_call which destroys all physical registers. *)
 
 let destroyed_at_oper = function
-    Iop(Icall_ind | Icall_imm _ | Iextcall { alloc = true; _}) ->
+    Iop(Icall_ind | Icall_imm _ | Iextcall _) ->
     all_phys_regs
-  | Iop(Iextcall { alloc = false; }) -> destroyed_at_c_call
   | Iop(Iintop(Idiv | Imod)) -> [| eax; edx |]
-  | Iop(Ialloc _) -> [| eax; ebx |]
+  | Iop(Ialloc _ | Ipoll _) -> [| eax; ebx |]
   | Iop(Iintop Imulh) -> [| eax |]
   | Iop(Iintop(Icomp _) | Iintop_imm(Icomp _, _)) -> [| eax |]
+  | Iop(Icompf _) -> [| eax; edx |]  (* fnstsw ax, then save ah to dl *)
   | Iop(Iintoffloat) -> [| eax |]
+  | Iop(Idls_get) -> [| edx |]  (* Uses edx as scratch for domain state *)
   | Iifthenelse(Ifloattest _, _, _) -> [| eax |]
   | Itrywith _ -> [| edx |]
   | _ -> [||]
@@ -220,7 +221,7 @@ let safe_register_pressure _op = 4
 let max_register_pressure = function
     Iextcall _ -> [| 4; max_int |]
   | Iintop(Idiv | Imod) -> [| 5; max_int |]
-  | Ialloc _ | Iintop(Icomp _) | Iintop_imm(Icomp _, _) |
+  | Ialloc _ | Ipoll _ | Iintop(Icomp _) | Iintop_imm(Icomp _, _) |
     Iintoffloat -> [| 6; max_int |]
   | _ -> [|7; max_int |]
 
@@ -234,7 +235,7 @@ let frame_required fd =
   in
   frame_size_at_top_of_function > 4
 
-let prologue_required fd =
+let _prologue_required fd =
   frame_required fd
 
 (* Calling the assembler *)
