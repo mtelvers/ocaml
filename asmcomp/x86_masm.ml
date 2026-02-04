@@ -91,6 +91,9 @@ let arg b = function
       if displ > 0 then bprintf b "+%d" displ
       else if displ < 0 then bprintf b "%d" displ
   | Mem addr -> arg_mem b addr
+  | Mem_tls (_, _) ->
+      (* TLS access not supported for MASM - i386 multicore is Linux only *)
+      failwith "Mem_tls not supported in MASM"
 
 let rec cst b = function
   | ConstLabel _ | Const _ | ConstThis as c -> scst b c

@@ -35,6 +35,7 @@ val const: int -> constant
 val al: arg
 val ah: arg
 val cl: arg
+val dl: arg
 val ax: arg
 val rax: arg
 val rbx: arg
@@ -67,6 +68,8 @@ val mem64:
 
 val mem64_rip: data_type -> ?ofs:int -> string -> arg
 
+val mem_tls: data_type -> string -> arg
+(** TLS memory access: %gs:symbol@ntpoff (for local-exec TLS model on i386) *)
 
 module D : sig
   (** Directives *)
