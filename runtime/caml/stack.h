@@ -65,6 +65,16 @@
 #ifdef TARGET_power
 /* Size of the gc_regs structure, in words.
    See power.S and power/proc.ml for the indices */
+#if defined(MODEL_ppc)
+/* PPC32: 23 int regs (4B each) + 1 padding word + 14 float regs (8B = 2 words each) */
+#define Wosize_gc_regs (23 + 1 + 14 * 2)
+#define Saved_return_address_raw(sp) *((intnat *)((sp) + 4))
+#define First_frame(sp) (sp)
+/* RESERVED_STACK(8) + TRAP_SIZE(8) + WORD (skip DWARF word, gc_regs is second) */
+#define Saved_gc_regs(sp) (*(value **)((sp) + 8 + 8 + 4))
+#define Stack_header_size (8 + 8 + 8)
+#else
+/* PPC64 */
 #ifdef WITH_FRAME_POINTERS
 #define Wosize_gc_regs \
   (22 /* int regs, r23 is ALLOC_PTR */ + 14 /* caller-save float regs */)
@@ -84,6 +94,7 @@
 #else
 #define Saved_gc_regs(sp) (*(value **)((sp) + 32 + 16 + 8))
 #define Stack_header_size (32 + 16 + 16)
+#endif
 #endif
 #define CODE_POINTER_MARK_BIT 0
 #endif
