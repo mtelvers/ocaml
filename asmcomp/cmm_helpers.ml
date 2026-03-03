@@ -959,8 +959,8 @@ let bigarray_word_kind : Lambda.bigarray_kind -> memory_chunk = function
   | Pbigarray_uint16 -> Sixteen_unsigned
   | Pbigarray_int32 -> Thirtytwo_signed
   | Pbigarray_int64 -> Sixtyfour
-  | Pbigarray_caml_int -> Sixtyfour
-  | Pbigarray_native_int -> Sixtyfour
+  | Pbigarray_caml_int -> Word_int
+  | Pbigarray_native_int -> Word_int
   | Pbigarray_complex32 -> Single
   | Pbigarray_complex64 -> Double
 

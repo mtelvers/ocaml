@@ -99,8 +99,13 @@ struct stack_info {
 #elif defined(TARGET_s390x)
   #define Reserved_space_c_stack_link 160
 #elif defined(TARGET_power)
-/* ELF ABI: 4 reserved words at bottom of C stack */
-  #define Reserved_space_c_stack_link 4 * 8
+  #if defined(MODEL_ppc)
+    /* PPC32 ELF ABI: no reserved space in c_stack_link */
+    #define Reserved_space_c_stack_link 0
+  #else
+    /* PPC64 ELF ABI: 4 reserved quadwords at bottom of C stack */
+    #define Reserved_space_c_stack_link 4 * 8
+  #endif
 #else
   #define Reserved_space_c_stack_link 0
 #endif
