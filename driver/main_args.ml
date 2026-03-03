@@ -1970,7 +1970,7 @@ module Default = struct
       Compenv.fatal
         "Profiling with \"gprof\" (option `-p') is only supported up to \
          OCaml 4.08.0"
-    let _shared () = shared := true; dlcode := true
+    let _shared () = shared := true; dlcode := true; pic_code := true
     let _v () = Compenv.print_version_and_library "native-code compiler"
   end
 
