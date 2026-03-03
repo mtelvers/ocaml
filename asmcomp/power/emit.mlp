@@ -24,20 +24,44 @@ open Linear
 open Emitaux
 open Emitenv
 
-let fp = Config.with_frame_pointers
+(* Frame pointer support is PPC64-only. On PPC32 the value is forced to
+   false so all fp-guarded code paths remain PPC64-specific. *)
+let fp = Config.with_frame_pointers && Arch.ppc64
+
+(* On PPC32, use GOT-indirect calls/loads when building PIC or dynamically
+   linkable code.  This avoids secure-PLT stubs (plt_pic32) that use r30 as
+   .got2 PIC base, which conflicts with r30 = DOMAIN_STATE_PTR in the
+   multicore runtime.  Uses per-CU .got2 section instead of system .got to
+   avoid GOT overflow (system crti.o uses 16-bit @got which overflows when
+   the GOT exceeds 64KB).  Pass -nodynlink to disable for executables that
+   don't need dynlink support, which gives slightly better performance
+   with direct "bl func" calls. *)
+let use_got () = !Clflags.pic_code || !Clflags.dlcode
 
 (* Reserved space at bottom of stack *)
 
-let reserved_stack_space = 32
+let reserved_stack_space =
+  match abi with
+  | ELF32 -> 8  (* Must match RESERVED_STACK in runtime/power.S.
+                    PPC32 ELF ABI requires 8 bytes at the bottom of each frame
+                    for the linkage area (back chain + LR save). *)
+  | ELF64v1 -> 48
+  | ELF64v2 -> 32
 
 (* Layout of the stack.  The stack is kept 16-aligned. *)
 
 let initial_stack_offset f =
   if f.fun_frame_required then
-    reserved_stack_space +                    (* Including the return address *)
+    reserved_stack_space +
     size_int * f.fun_num_stack_slots.(0) +    (* Local int variables *)
     size_float * f.fun_num_stack_slots.(1) +  (* Local float variables *)
-    (if fp then size_int else 0)              (* Saved frame pointer r31 *)
+    (if fp then size_int else 0)     (* Saved frame pointer r31 (PPC64) *)
+    (* The return address is saved in the caller's LR save area
+       (at offset LR_SAVE_OFFSET from caller's SP), so no additional
+       space is needed in the current frame.  On PPC, LR must always be
+       saved when a frame is required because bltl- in allocation checks
+       unconditionally clobbers LR per the PPC ISA (LR is set to CIA+4
+       when LK=1, regardless of whether the branch is taken). *)
   else
     0
 
@@ -48,10 +72,15 @@ let fp_save_offset env =
   env.f.fun_num_stack_slots.(0) * size_int
 
 let frame_size env =
-  let size =
-    env.stack_offset +                     (* Trap frame, outgoing parameters *)
-    initial_stack_offset env.f in
-  Misc.align size 16
+  (* Align the base frame (prologue push) to 16 bytes first, then add the
+     dynamic stack offset (from Lpushtrap / Istackoffset).  The prologue
+     pushes exactly align(initial_stack_offset, 16) bytes.  Any later
+     dynamic adjustments are on top of that.  Aligning the sum instead
+     would give a different result when stack_offset is not a multiple of
+     16 (e.g. trap_size = 8 on PPC32), causing the frame descriptor to
+     disagree with the actual stack displacement. *)
+  let base = Misc.align (initial_stack_offset env.f) 16 in
+  base + env.stack_offset
 
 let slot_offset env loc cls =
   match loc with
@@ -66,9 +95,19 @@ let slot_offset env loc cls =
   | Outgoing n -> reserved_stack_space + n
   | Domainstate _ -> assert false  (* not a stack slot *)
 
-let retaddr_offset env = frame_size env + 16
+let retaddr_offset env =
+  match abi with
+  | ELF32 -> frame_size env + size_addr
+      (* PPC32 ELF: store return address in caller's LR save area,
+         at offset LR_SAVE_OFFSET (4) from caller's SP.
+         Since caller's SP = current SP + frame_size, this gives
+         frame_size + 4.  Same convention as PPC64 (frame_size + 16). *)
+  | ELF64v1 | ELF64v2 -> frame_size env + 16
 
-let toc_save_offset env = frame_size env + 8
+let toc_save_offset env =
+  match abi with
+  | ELF32 -> assert false
+  | ELF64v1 | ELF64v2 -> frame_size env + 8
 
 (* Upper bound on the r1-relative displacements emitted for [f]: the deepest
    frame, plus the linkage and incoming-argument areas above it. *)
@@ -80,10 +119,14 @@ let max_frame_offset f =
   Misc.align (initial_stack_offset f) 16
   + f.fun_extra_stack_used + 2 * reserved_stack_space + incoming + 16
 
-(* Trap frame size.  With frame pointers [Lpushtrap] uses [stdu] and the trap
-   data lives inside the new frame (32 + 16); otherwise 16 bytes suffice.
-   Must match [Stackframe.trap_handler_size]. *)
-let trap_size = if fp then 48 else 16
+(* Trap frame size.  On PPC64, [Lpushtrap] uses [stdu] with frame pointers
+   and the trap data lives inside the new frame (32 + 16); otherwise 16
+   bytes suffice.  On PPC32 it is 8.  Must match
+   [Stackframe.trap_handler_size]. *)
+let trap_size =
+  if ppc64
+  then (if fp then 48 else 16)
+  else 8
 
 (* Output a label *)
 
@@ -106,6 +149,18 @@ let toc_space =
 let emit_named_text_section func_name =
   Emitaux.emit_named_text_section func_name '@'
 
+(* Names of instructions that differ in 32 and 64-bit modes *)
+
+let lg = if ppc64 then "ld" else "lwz"
+let stg = if ppc64 then "std" else "stw"
+let lwa = if ppc64 then "lwa" else "lwz"
+let cmpg = if ppc64 then "cmpd" else "cmpw"
+let cmplg = if ppc64 then "cmpld" else "cmplw"
+let cmplgi = if ppc64 then "cmpldi" else "cmplwi"
+let datag = if ppc64 then ".quad" else ".long"
+let mullg = if ppc64 then "mulld" else "mullw"
+let divg = if ppc64 then "divd" else "divw"
+
 (* Output a processor register *)
 
 let emit_gpr = emit_int
@@ -116,6 +171,88 @@ let emit_reg r =
   match r.loc with
   | Reg r -> emit_string (register_name r)
   | _ -> Misc.fatal_error "Emit.emit_reg"
+
+(* Output the name of a symbol plus an optional offset *)
+
+let emit_symbol_offset (s, d) =
+  emit_symbol s;
+  if d > 0 then `+`;
+  if d <> 0 then emit_int d
+
+(* Load a symbol address into a register (ELF32).
+   Use PC-relative addressing for internal symbols:
+   1. Get current PC using bcl/mflr idiom
+   2. Add the offset from PC to symbol using addis/addi
+   This works for symbols defined in the same executable.
+   Note: bcl clobbers LR, so we save/restore it via r0 (not allocatable). *)
+
+let emit_symbol_load emit_dest dest sym =
+  let lbl = new_label() in
+  `	mflr	0\n`;
+  `	bcl	20, 31, {emit_label lbl}\n`;
+  `{emit_label lbl}:	mflr	{emit_dest dest}\n`;
+  `	mtlr	0\n`;
+  `	addis	{emit_dest dest}, {emit_dest dest}, ({emit_symbol sym}-{emit_label lbl})@ha\n`;
+  `	addi	{emit_dest dest}, {emit_dest dest}, ({emit_symbol sym}-{emit_label lbl})@l\n`
+
+(* Load a local label address into a register using PC-relative addressing (ELF32 PIE).
+   Same pattern as emit_symbol_load but for assembler-local labels.
+   Note: bcl clobbers LR, so we save/restore it via r0 (not allocatable). *)
+
+let emit_label_load dest target_lbl =
+  let pc_lbl = new_label() in
+  `	mflr	0\n`;
+  `	bcl	20, 31, {emit_label pc_lbl}\n`;
+  `{emit_label pc_lbl}:	mflr	{emit_gpr dest}\n`;
+  `	mtlr	0\n`;
+  `	addis	{emit_gpr dest}, {emit_gpr dest}, ({emit_label target_lbl}-{emit_label pc_lbl})@ha\n`;
+  `	addi	{emit_gpr dest}, {emit_gpr dest}, ({emit_label target_lbl}-{emit_label pc_lbl})@l\n`
+
+(* Per-CU .got2 table for ELF32 PIC: avoids system GOT overflow.
+   Each OCaml compilation unit gets its own .got2 section with entries
+   for external symbol addresses, filled by the dynamic linker via
+   R_PPC_ADDR32 relocations.  Code accesses these via PC-relative
+   addressing to .got2, which doesn't create system .got entries. *)
+
+let got2_entries : (string, label) Hashtbl.t = Hashtbl.create 64
+let got2_toc_label = ref 0
+
+let label_for_got2 sym =
+  try Hashtbl.find got2_entries sym
+  with Not_found ->
+    let lbl = new_label() in
+    Hashtbl.add got2_entries sym lbl;
+    lbl
+
+(* Load an external symbol address via .got2 (ELF32).
+   Uses per-CU .got2 section instead of system .got to avoid GOT overflow.
+   7 instructions (vs 8 for the old system .got approach).
+   Note: bcl clobbers LR, so we save/restore it via r0 (not allocatable). *)
+
+let emit_symbol_load_got emit_dest dest sym =
+  let got2_lbl = label_for_got2 sym in
+  let pc_lbl = new_label() in
+  `	mflr	0\n`;
+  `	bcl	20, 31, {emit_label pc_lbl}\n`;
+  `{emit_label pc_lbl}:	mflr	{emit_dest dest}\n`;
+  `	mtlr	0\n`;
+  `	addis	{emit_dest dest}, {emit_dest dest}, {emit_label !got2_toc_label}-{emit_label pc_lbl}@ha\n`;
+  `	addi	{emit_dest dest}, {emit_dest dest}, {emit_label !got2_toc_label}-{emit_label pc_lbl}@l\n`;
+  `	lwz	{emit_dest dest}, {emit_label got2_lbl}-{emit_label !got2_toc_label}({emit_dest dest})\n`
+
+let got2_space =
+  "	.section \".got2\",\"aw\"\n"
+
+let emit_got2table () =
+  if Hashtbl.length got2_entries > 0 then begin
+    emit_string got2_space;
+    `	.balign	4\n`;
+    `{emit_label !got2_toc_label} = . + 32768\n`;
+    Hashtbl.iter
+      (fun sym lbl ->
+        `{emit_label lbl}:	.long	{emit_symbol sym}\n`)
+      got2_entries
+  end
 
 (* Split a 32-bit integer constants in two 16-bit halves *)
 
@@ -182,8 +319,12 @@ let emit_toctable () =
 
 let emit_tocload emit_dest dest entry =
   let lbl = label_for_tocref entry in
-  `	addis	{emit_dest dest}, 2, {emit_label lbl}@toc@ha\n`;
-  `	ld	{emit_dest dest}, {emit_label lbl}@toc@l({emit_dest dest}) # {emit_tocentry entry}\n`
+  if !big_toc || !Clflags.for_package <> None then begin
+    `	addis	{emit_dest dest}, 2, {emit_label lbl}@toc@ha\n`;
+    `	ld	{emit_dest dest}, {emit_label lbl}@toc@l({emit_dest dest}) # {emit_tocentry entry}\n`
+  end else begin
+    `	ld	{emit_dest dest}, {emit_label lbl}@toc(2) # {emit_tocentry entry}\n`
+  end
 
 (* Output a load or store operation *)
 
@@ -193,8 +334,9 @@ let load_mnemonic = function
   | Sixteen_unsigned -> "lhz"
   | Sixteen_signed -> "lha"
   | Thirtytwo_unsigned -> "lwz"
-  | Thirtytwo_signed -> "lwa"
-  | Word_int | Word_val | Sixtyfour -> "ld"
+  | Thirtytwo_signed -> if ppc64 then "lwa" else "lwz"
+  | Word_int | Word_val -> lg
+  | Sixtyfour -> "ld"
   | Single -> "lfs"
   | Double -> "lfd"
 
@@ -202,7 +344,8 @@ let store_mnemonic = function
   | Byte_unsigned | Byte_signed -> "stb"
   | Sixteen_unsigned | Sixteen_signed -> "sth"
   | Thirtytwo_unsigned | Thirtytwo_signed -> "stw"
-  | Word_int | Word_val | Sixtyfour -> "std"
+  | Word_int | Word_val -> stg
+  | Sixtyfour -> "std"
   | Single -> "stfs"
   | Double -> "stfd"
 
@@ -215,15 +358,43 @@ let valid_offset instr ofs =
 let emit_load_store instr addressing_mode addr n arg =
   match addressing_mode with
   | Ibased(s, d) ->
-      emit_tocload emit_gpr 11 (TocSym s);
-      let (lo, hi) = low_high_s d in
-      if hi <> 0 then
-        `	addis	11, 11, {emit_int hi}\n`;
-      if valid_offset instr lo then
-        `	{emit_string instr}	{emit_reg arg}, {emit_int lo}(11)\n`
-      else begin
-        `	li	0, {emit_int lo}\n`;
-        `	{emit_string instr}x	{emit_reg arg}, 11, 0\n`
+      begin match abi with
+      | ELF32 when use_got () ->
+        (* In shared library mode, load symbol address from GOT then apply offset.
+           This avoids PLT stubs (plt_pic32) that use r30 as .got2 PIC base,
+           conflicting with r30 = DOMAIN_STATE_PTR. *)
+        emit_symbol_load_got emit_gpr 11 s;
+        let (lo, hi) = low_high_s d in
+        if hi <> 0 then
+          `	addis	11, 11, {emit_int hi}\n`;
+        if valid_offset instr lo then
+          `	{emit_string instr}	{emit_reg arg}, {emit_int lo}(11)\n`
+        else begin
+          `	addi	11, 11, {emit_int lo}\n`;
+          `	{emit_string instr}	{emit_reg arg}, 0(11)\n`
+        end
+      | ELF32 ->
+        (* Use PC-relative addressing for PIE compatibility.
+           Note: bcl clobbers LR, so save/restore via r0. *)
+        let lbl = new_label() in
+        `	mflr	0\n`;
+        `	bcl	20, 31, {emit_label lbl}\n`;
+        `{emit_label lbl}:	mflr	11\n`;
+        `	mtlr	0\n`;
+        `	addis	11, 11, ({emit_symbol_offset (s,d)}-{emit_label lbl})@ha\n`;
+        `	addi	11, 11, ({emit_symbol_offset (s,d)}-{emit_label lbl})@l\n`;
+        `	{emit_string instr}	{emit_reg arg}, 0(11)\n`
+      | ELF64v1 | ELF64v2 ->
+        emit_tocload emit_gpr 11 (TocSym s);
+        let (lo, hi) = low_high_s d in
+        if hi <> 0 then
+          `	addis	11, 11, {emit_int hi}\n`;
+        if valid_offset instr lo then
+          `	{emit_string instr}	{emit_reg arg}, {emit_int lo}(11)\n`
+        else begin
+          `	li	0, {emit_int lo}\n`;
+          `	{emit_string instr}x	{emit_reg arg}, 11, 0\n`
+        end
       end
   | Iindexed ofs ->
       if is_immediate ofs && valid_offset instr ofs then
@@ -351,12 +522,23 @@ let emit_free_frame env =
 (* Emit a "bl" instruction to a given symbol *)
 
 let emit_call s =
-  `	bl	{emit_symbol s}\n`
+  match abi with
+  | ELF32 when use_got () ->
+    (* Use .got2-indirect calls to avoid PLT stubs (plt_pic32) that use r30
+       as GOT base, conflicting with r30 = DOMAIN_STATE_PTR.  Uses per-CU
+       .got2 section to avoid system GOT overflow. *)
+    emit_symbol_load_got emit_gpr 11 s;
+    `	mtctr	11\n`;
+    `	bctrl\n`
+  | _ ->
+    `	bl	{emit_symbol s}\n`
 
 (* Add a nop after a "bl" call for ELF64 *)
 
 let emit_call_nop () =
-  `	nop	\n`
+  match abi with
+  | ELF32 -> ()
+  | ELF64v1 | ELF64v2 -> `	nop	\n`
 
 (* Reload the TOC register r2 from the value saved on the stack *)
 
@@ -400,22 +582,22 @@ let branch_for_comparison = function
   | Cge -> "bge" | Clt -> "blt"
 
 let name_for_int_comparison = function
-    Isigned cmp -> ("cmpd", branch_for_comparison cmp)
-  | Iunsigned cmp -> ("cmpld", branch_for_comparison cmp)
+    Isigned cmp -> (cmpg, branch_for_comparison cmp)
+  | Iunsigned cmp -> (cmplg, branch_for_comparison cmp)
 
 (* Names for various instructions *)
 
 let name_for_intop = function
     Iadd  -> "add"
-  | Imul  -> "mulld"
-  | Imulh -> "mulhd"
-  | Idiv  -> "divd"
+  | Imul  -> if ppc64 then "mulld" else "mullw"
+  | Imulh -> if ppc64 then "mulhd" else "mulhw"
+  | Idiv  -> if ppc64 then "divd" else "divw"
   | Iand  -> "and"
   | Ior   -> "or"
   | Ixor  -> "xor"
-  | Ilsl  -> "sld"
-  | Ilsr  -> "srd"
-  | Iasr  -> "srad"
+  | Ilsl  -> if ppc64 then "sld" else "slw"
+  | Ilsr  -> if ppc64 then "srd" else "srw"
+  | Iasr  -> if ppc64 then "srad" else "sraw"
   | _ -> Misc.fatal_error "Emit.Intop"
 
 let name_for_intop_imm = function
@@ -424,9 +606,9 @@ let name_for_intop_imm = function
   | Iand -> "andi."
   | Ior  -> "ori"
   | Ixor -> "xori"
-  | Ilsl -> "sldi"
-  | Ilsr -> "srdi"
-  | Iasr -> "sradi"
+  | Ilsl -> if ppc64 then "sldi" else "slwi"
+  | Ilsr -> if ppc64 then "srdi" else "srwi"
+  | Iasr -> if ppc64 then "sradi" else "srawi"
   | _ -> Misc.fatal_error "Emit.Intop_imm"
 
 let name_for_floatop1 = function
@@ -480,17 +662,26 @@ module BR = Branch_relaxation.Make (struct
   let prologue_size f =
     if f.fun_frame_required then
       if large_frame f then (if fp then 9 else 5)
-      else 4 + (if fp then 2 else 0)  (* +2 for save old FP and set FP = SP *)
+      else (if abi = ELF32 then 3 else 4)
+           + (if fp then 2 else 0)  (* +2 for save old FP and set FP = SP *)
     else 0
 
-  let tocload_size = 2
+  let tocload_size =
+    if abi = ELF32 then 0  (* no TOC on ELF32 *)
+    else if !big_toc || !Clflags.for_package <> None then 2 else 1
 
   let load_store_size instr = function
     | Ibased(_s, d) ->
-      let (lo, hi) = low_high_s d in
-      tocload_size +
-      (if hi <> 0 then 1 else 0) +
-      (if valid_offset instr lo then 1 else 2)
+      if abi = ELF32 then
+        (* Non-dlcode: mflr, bcl, mflr, mtlr, addis, addi, load/store = 7
+           dlcode: .got2 load (7) + addis (1) + addi/load (2) = 10 (conservative) *)
+        (if use_got () then 10 else 7)
+      else begin
+        let (lo, hi) = low_high_s d in
+        tocload_size +
+        (if hi <> 0 then 1 else 0) +
+        (if valid_offset instr lo then 1 else 2)
+      end
     | Iindexed ofs ->
       if is_immediate ofs && valid_offset instr ofs then 1 else begin
         let (lo, _hi) = low_high_u ofs in
@@ -514,20 +705,46 @@ module BR = Branch_relaxation.Make (struct
       else if (let (_lo, hi) = native_low_high_u n in
                hi >= -0x8000 && hi <= 0x7FFF) then 2
       else tocload_size
-    | Lop(Iconst_float _) -> tocload_size
-    | Lop(Iconst_symbol _) -> tocload_size
-    | Lop(Icall_ind) -> 4 + if_large 1
-    | Lop(Icall_imm _) -> 3 + if_large 1
-    | Lop(Itailcall_ind) -> 6 + fp_save + if_large 3
+    | Lop(Iconst_float _) -> if abi = ELF32 then 7 else tocload_size
+    | Lop(Iconst_symbol _) ->
+        if abi = ELF32 then
+          (if use_got () then 7 else 6)
+        else tocload_size
+    | Lop(Icall_ind) ->
+        if abi = ELF32 then 2 else 4 + if_large 1
+    | Lop(Icall_imm _) ->
+        if abi = ELF32 then
+          (if use_got () then 9 else 1)
+        else 3 + if_large 1
+    | Lop(Itailcall_ind) ->
+        (if abi = ELF32 then 5 else 6)
+        + fp_save + if_large 3
     | Lop(Itailcall_imm { func; _ }) ->
         if func = f.fun_name
         then 1
+        else if abi = ELF32 then
+          (if use_got () then 12 else 4)
         else 6 + tocload_size + fp_save + if_large 3
     | Lop(Iextcall { alloc; stack_ofs; _}) ->
-        if stack_ofs > 0
-        then tocload_size + 4 + (if is_immediate stack_ofs then 0 else 1)
-        else if alloc then tocload_size + 2
-        else 5 + (if fp then 3 else 0)  (* ld+stdu+addi for fp support *)
+        if stack_ofs > 0 then
+          (if abi = ELF32 then
+            (* PIC: .got2 load(7) + li(1) + emit_call(9)
+               non-PIC: emit_symbol_load(6) + li(1) + emit_call(1) *)
+            (if use_got () then 17 else 8)
+          else tocload_size + 4
+               + (if is_immediate stack_ofs then 0 else 1))
+        else if alloc then
+          (if abi = ELF32 then
+            (* PIC: .got2 load(7) + emit_call(9)
+               non-PIC: emit_symbol_load(6) + emit_call(1) *)
+            (if use_got () then 16 else 7)
+          else tocload_size + 2)
+        else
+          (if abi = ELF32 then
+            (* mr(1) + lg(1) + addi(1) + emit_call(9 or 1) + mr(1) *)
+            (if use_got () then 13 else 5)
+          else 5 + (if fp then 3 else 0)
+                  (* ld+stdu+addi for fp support *))
     | Lop(Istackoffset n) ->
         if fp && n > 0 then 3 + if_large 4 else 1 + if_large 1
     | Lop(Iload {memory_chunk; addressing_mode; is_atomic }) ->
@@ -557,15 +774,18 @@ module BR = Branch_relaxation.Make (struct
     | Lop(Ispecific(Icheckbound_imm_far _)) -> 3
     | Lop(Iintop_imm _) -> 1
     | Lop(Inegf | Iabsf | Iaddf | Isubf | Imulf | Idivf) -> 1
-    | Lop(Ifloatofint) -> 3
-    | Lop(Iintoffloat) -> 3
+    | Lop(Ifloatofint) -> if ppc64 then 3 else 14
+    | Lop(Iintoffloat) -> if ppc64 then 3 else 4
     | Lop(Iopaque) -> 0
     | Lop(Ispecific _) -> 1
     | Lop(Idls_get) -> 1
     | Lop(Iatomic_fetch_add) -> 7
-    | Lop(Ireturn_addr) -> if f.fun_frame_required then 1 + if_large 1 else 1
-    | Lreloadretaddr -> 2 + if_large 1
+    | Lop(Ireturn_addr) ->
+        if f.fun_frame_required then 1 + if_large 1 else 1
+    | Lreloadretaddr ->
+        if f.fun_frame_required then 2 + if_large 1 else 0
     | Lreturn -> 2 + fp_save + if_large (1 + fp_save)
+        (* +1 for restore FP *)
     | Llabel _ -> 0
     | Lbranch _ -> 1
     | Lcondbranch (Ifloattest(CFle | CFnle  | CFge | CFnge), _) -> 3
@@ -574,12 +794,19 @@ module BR = Branch_relaxation.Make (struct
       1 + (if lbl0 = None then 0 else 1)
         + (if lbl1 = None then 0 else 1)
         + (if lbl2 = None then 0 else 1)
-    | Lswitch _ -> 7 + tocload_size
-    | Lentertrap -> 1 + fp_save + if_large 1
+    | Lswitch _ -> if abi = ELF32 then 11 else 7 + tocload_size
+    | Lentertrap ->
+        if abi = ELF32 then 0
+        else 1 + fp_save + if_large 1
     | Ladjust_trap_depth _ -> 0
-    | Lpushtrap _ -> (if fp then 6 else 4) + tocload_size
+    | Lpushtrap _ ->
+        if abi = ELF32 then 10
+        else (if fp then 6 else 4) + tocload_size
     | Lpoptrap -> 2
-    | Lraise (Lambda.Raise_regular | Lambda.Raise_reraise) -> 2
+    | Lraise (Lambda.Raise_regular | Lambda.Raise_reraise) ->
+        if abi = ELF32 then
+          (if use_got () then 9 else 1)
+        else 2
     | Lraise Lambda.Raise_notrace -> 5
 
   let relax_allocation ~num_bytes:bytes ~dbginfo =
@@ -604,9 +831,9 @@ end)
 let emit_alloc env i bytes dbginfo far =
   if env.call_gc_label = 0 then env.call_gc_label <- new_label ();
   let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
-  `	ld	0, {emit_int offset}(30)\n`;
+  `	{emit_string lg}	0, {emit_int offset}(30)\n`;
   `	addi	23, 23, {emit_int(-bytes)}\n`;
-  `	cmpld	23, 0\n`;
+  `	{emit_string cmplg}	23, 0\n`;
   if not far then begin
     `	bltl-	{emit_label env.call_gc_label}\n`;
     record_frame env i.live (Dbg_alloc dbginfo);
@@ -622,8 +849,8 @@ let emit_alloc env i bytes dbginfo far =
 let emit_poll env i return_label far =
   if env.call_gc_label = 0 then env.call_gc_label <- new_label ();
   let offset = Domainstate.(idx_of_field Domain_young_limit) * 8 in
-  `	ld	0, {emit_int offset}(30)\n`;
-  `	cmpld	23, 0\n`;
+  `	{emit_string lg}	0, {emit_int offset}(30)\n`;
+  `	{emit_string cmplg}	23, 0\n`;
   if not far then begin
     begin match return_label with
     | None ->
@@ -686,27 +913,48 @@ let emit_instr env i =
     | Lend -> ()
     | Lprologue ->
         let n = frame_size env in
-        if env.f.fun_frame_required then begin
+        if fp then begin
+          (* With frame pointers: save LR/TOC/FP in caller's frame BEFORE
+             allocation, since [stdu] atomically writes the back chain and
+             adjusts SP.  Then allocate with [stdu] and set FP := SP. *)
+          if env.f.fun_frame_required then begin
             `	mflr	0\n`;
-            `	std	0, {emit_int 16}(1)\n`;
-            `	std	2, {emit_int 8}(1)\n`;
+            `	std	0, 16(1)\n`;
+            `	std	2, 8(1)\n`;
             cfi_offset ~reg: 65 (* LR *) ~offset: 16;
-            if fp then
-              emit_sp_mem "std" emit_gpr 31 (fp_save_offset env - n) 12
-         end;
-        if n > 0 then begin
-            if fp then
-              emit_frame_push n
-            else
-              emit_addi_inplace 1 (-n);
+            emit_sp_mem "std" emit_gpr 31 (fp_save_offset env - n) 12
+          end;
+          if n > 0 then begin
+            emit_frame_push n;
             cfi_adjust_cfa_offset n;
-            (* Note: We don't emit .cfi_offset for r1 (backchain) because trap frames
-               can overwrite the backchain location. The signal frame's val_expression
-               for r1 handles SP restoration during C call unwinding. *)
-            if fp && env.f.fun_frame_required then begin
+            (* Note: We don't emit .cfi_offset for r1 (backchain) because trap
+               frames can overwrite the backchain location. The signal frame's
+               val_expression for r1 handles SP restoration during C call
+               unwinding. *)
+            if env.f.fun_frame_required then begin
               `	mr	31, 1\n`;
               cfi_offset ~reg: 31 (* FP *) ~offset: (fp_save_offset env - n)
             end
+          end
+        end else begin
+          if n > 0 then begin
+            emit_addi_inplace 1 (-n);
+            cfi_adjust_cfa_offset n
+          end;
+          if env.f.fun_frame_required then begin
+            (* On PPC, always save LR when a frame is required.
+               bltl- in allocation/poll checks unconditionally clobbers LR
+               (PPC ISA: LR is set when LK=1 regardless of branch outcome). *)
+            let ra = retaddr_offset env in
+            `	mflr	0\n`;
+            emit_sp_mem stg emit_gpr 0 ra 12;
+            cfi_offset ~reg: 65 (* LR *) ~offset: (ra - n);
+            begin match abi with
+            | ELF32 -> ()
+            | ELF64v1 | ELF64v2 ->
+                emit_sp_mem "std" emit_gpr 2 (toc_save_offset env) 12
+            end
+          end
         end
     | Lop(Imove | Ispill | Ireload) ->
         let src = i.arg.(0) and dst = i.res.(0) in
@@ -717,11 +965,11 @@ let emit_instr env i =
             | {loc = Reg _; typ = Float}, {loc = Reg _; typ = Float} ->
                 `	fmr	{emit_reg dst}, {emit_reg src}\n`
             | {loc = Reg _; typ = (Val | Int | Addr)}, {loc = Stack _} ->
-                emit_reg_stack "std" env src dst 12
+                emit_reg_stack stg env src dst 12
             | {loc = Reg _; typ = Float}, {loc = Stack _} ->
                 emit_reg_stack "stfd" env src dst 12
             | {loc = Stack _; typ = (Val | Int | Addr)}, {loc = Reg _} ->
-                emit_reg_stack "ld" env dst src 12
+                emit_reg_stack lg env dst src 12
             | {loc = Stack _; typ = Float}, {loc = Reg _} ->
                 emit_reg_stack "lfd" env dst src 12
             | (_, _) ->
@@ -746,48 +994,90 @@ let emit_instr env i =
           if lo <> 0 then
           `	ori	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, {emit_int lo}\n`
         end else begin
-          emit_tocload emit_reg i.res.(0) (TocInt n)
+          match abi with
+          | ELF32 -> assert false
+          | ELF64v1 | ELF64v2 ->
+              emit_tocload emit_reg i.res.(0) (TocInt n)
         end end end
     | Lop(Iconst_float f) ->
-        let entry = TocFloat f in
-        let lbl = label_for_tocref entry in
-        `	addis	11, 2, {emit_label lbl}@toc@ha\n`;
-        `	lfd	{emit_reg i.res.(0)}, {emit_label lbl}@toc@l(11) # {emit_tocentry entry}\n`
+        begin match abi with
+        | ELF32 ->
+          let lbl = new_label() in
+          env.float_literals <- { fl=f; lbl } :: env.float_literals;
+          emit_label_load 11 lbl;
+          `	lfd	{emit_reg i.res.(0)}, 0(11)\n`
+        | ELF64v1 | ELF64v2 ->
+          let entry = TocFloat f in
+          let lbl = label_for_tocref entry in
+          if !big_toc || !Clflags.for_package <> None then begin
+            `	addis	11, 2, {emit_label lbl}@toc@ha\n`;
+            `	lfd	{emit_reg i.res.(0)}, {emit_label lbl}@toc@l(11) # {emit_tocentry entry}\n`
+          end else begin
+            `	lfd	{emit_reg i.res.(0)}, {emit_label lbl}@toc(2) # {emit_tocentry entry}\n`
+          end
+        end
     | Lop(Iconst_symbol s) ->
-        emit_tocload emit_reg i.res.(0) (TocSym s)
+        begin match abi with
+        | ELF32 when use_got () ->
+          (* In shared library mode, use GOT-indirect for all symbol loads
+             since PC-relative addressing fails for external symbols *)
+          emit_symbol_load_got emit_reg i.res.(0) s
+        | ELF32 ->
+          emit_symbol_load emit_reg i.res.(0) s
+        | ELF64v1 | ELF64v2 ->
+          emit_tocload emit_reg i.res.(0) (TocSym s)
+        end
     | Lop(Icall_ind) ->
-        `	mtctr	{emit_reg i.arg.(0)}\n`;
-        `	mr	12, {emit_reg i.arg.(0)}\n`;  (* addr of fn in r12 *)
-        `	bctrl\n`;
-        record_frame env i.live (Dbg_other i.dbg);
-        emit_reload_toc env
+        begin match abi with
+        | ELF32 ->
+          `	mtctr	{emit_reg i.arg.(0)}\n`;
+          `	bctrl\n`;
+          record_frame env i.live (Dbg_other i.dbg)
+        | ELF64v1 | ELF64v2 ->
+          `	mtctr	{emit_reg i.arg.(0)}\n`;
+          `	mr	12, {emit_reg i.arg.(0)}\n`;  (* addr of fn in r12 *)
+          `	bctrl\n`;
+          record_frame env i.live (Dbg_other i.dbg);
+          emit_reload_toc env
+        end
     | Lop(Icall_imm { func; }) ->
-        (* For PPC64, we cannot just emit a "bl s; nop" sequence, because
-           of the following scenario:
-              - current function f1 calls f2 that has the same TOC
-              - f2 tailcalls f3 that has a different TOC
-           Because f1 and f2 have the same TOC, the linker inserted no
-           code in f1 to save and restore r2 around the call to f2.
-           Because f2 tailcalls f3, r2 will not be restored to f2's TOC
-           when f3 returns.  So, we're back into f1, with the wrong TOC in r2.
-           We have two options:
-             1- Turn the call into an indirect call, like we do for
-                Itailcall_imm.  Cost: 6 instructions.
-             2- Follow the "bl" with an instruction to restore r2
-                explicitly.  If the called function has a different TOC,
-                this instruction is redundant with those inserted
-                by the linker, but this is harmless.
-                Cost: 3 instructions if same TOC, 7 if different TOC.
-           Let's try option 2. *)
-        emit_call func;
-        record_frame env i.live (Dbg_other i.dbg);
-        `	nop\n`;
-        emit_reload_toc env
+        begin match abi with
+        | ELF32 ->
+            emit_call func;
+            record_frame env i.live (Dbg_other i.dbg)
+        | ELF64v1 | ELF64v2 ->
+            (* For PPC64, we cannot just emit a "bl s; nop" sequence, because
+               of the following scenario:
+                  - current function f1 calls f2 that has the same TOC
+                  - f2 tailcalls f3 that has a different TOC
+               Because f1 and f2 have the same TOC, the linker inserted no
+               code in f1 to save and restore r2 around the call to f2.
+               Because f2 tailcalls f3, r2 will not be restored to f2's TOC
+               when f3 returns.  So, we're back into f1, with the wrong TOC in r2.
+               We have two options:
+                 1- Turn the call into an indirect call, like we do for
+                    Itailcall_imm.  Cost: 6 instructions.
+                 2- Follow the "bl" with an instruction to restore r2
+                    explicitly.  If the called function has a different TOC,
+                    this instruction is redundant with those inserted
+                    by the linker, but this is harmless.
+                    Cost: 3 instructions if same TOC, 7 if different TOC.
+               Let's try option 2. *)
+            emit_call func;
+            record_frame env i.live (Dbg_other i.dbg);
+            `	nop\n`;
+            emit_reload_toc env
+        end
     | Lop(Itailcall_ind) ->
-        `	mtctr	{emit_reg i.arg.(0)}\n`;
-        `	mr	12, {emit_reg i.arg.(0)}\n`;   (* addr of fn in r12 *)
+        begin match abi with
+        | ELF32 ->
+          `	mtctr	{emit_reg i.arg.(0)}\n`
+        | ELF64v1 | ELF64v2 ->
+          `	mtctr	{emit_reg i.arg.(0)}\n`;
+          `	mr	12, {emit_reg i.arg.(0)}\n`   (* addr of fn in r12 *)
+        end;
         if env.f.fun_frame_required then begin
-          emit_sp_mem "ld" emit_gpr 11 (retaddr_offset env) 11;
+          emit_sp_mem lg emit_gpr 11 (retaddr_offset env) 11;
           `	mtlr	11\n`
         end;
         emit_free_frame env;
@@ -796,28 +1086,58 @@ let emit_instr env i =
         if func = env.f.fun_name then
           `	b	{emit_label env.f.fun_tailrec_entry_point_label}\n`
         else begin
-          emit_tocload emit_gpr 12 (TocSym func); (* addr of fn must be in r12 *)
-          `	mtctr	12\n`;
+          begin match abi with
+          | ELF32 when use_got () ->
+            (* GOT-indirect tail call: load target into CTR before
+               restoring the frame, since we use r11 as scratch *)
+            emit_symbol_load_got emit_gpr 11 func;
+            `	mtctr	11\n`
+          | ELF32 -> ()
+          | ELF64v1 | ELF64v2 ->
+            emit_tocload emit_gpr 12 (TocSym func); (* addr of fn must be in r12 *)
+            `	mtctr	12\n`
+          end;
           if env.f.fun_frame_required then begin
-            emit_sp_mem "ld" emit_gpr 11 (retaddr_offset env) 11;
+            emit_sp_mem lg emit_gpr 11 (retaddr_offset env) 11;
             `	mtlr	11\n`
           end;
           emit_free_frame env;
-          `	bctr\n`
+          begin match abi with
+          | ELF32 when use_got () ->
+            `	bctr\n`
+          | ELF32 ->
+            `	b	{emit_symbol func}\n`
+          | ELF64v1 | ELF64v2 ->
+            `	bctr\n`
+          end
         end
     | Lop(Iextcall { func; alloc; stack_ofs }) ->
         if stack_ofs > 0 then begin
-          emit_tocload emit_gpr 25 (TocSym func);
+          begin match abi with
+          | ELF32 when use_got () ->
+            emit_symbol_load_got emit_gpr 25 func
+          | ELF32 ->
+            emit_symbol_load emit_gpr 25 func
+          | ELF64v1 | ELF64v2 ->
+            emit_tocload emit_gpr 25 (TocSym func)
+          end;
           emit_li 24 stack_ofs;
              (* size in bytes of stack area containing the arguments *)
           emit_call "caml_c_call_stack_args";
           record_frame env i.live (Dbg_other i.dbg);
-          `	nop\n`
+          emit_call_nop()
         end else if alloc then begin
-          emit_tocload emit_gpr 25 (TocSym func);
+          begin match abi with
+          | ELF32 when use_got () ->
+            emit_symbol_load_got emit_gpr 25 func
+          | ELF32 ->
+            emit_symbol_load emit_gpr 25 func
+          | ELF64v1 | ELF64v2 ->
+            emit_tocload emit_gpr 25 (TocSym func)
+          end;
           emit_call "caml_c_call";
           record_frame env i.live (Dbg_other i.dbg);
-          `	nop\n`
+          emit_call_nop()
         end else begin
           (* Save OCaml stack pointer in a callee-save register *)
           `	mr	28, 1\n`;
@@ -829,7 +1149,12 @@ let emit_instr env i =
             `	ld	12, 0(1)\n`;
           (* Switch to C stack *)
           let offset = Domainstate.(idx_of_field Domain_c_stack) * 8 in
-          `	ld	1, {emit_int offset}(30)\n`;
+          `	{emit_string lg}	1, {emit_int offset}(30)\n`;
+          if abi = ELF32 then
+            (* On PPC32, c_stack points to a struct c_stack_link.
+               We must place SP below it, matching SWITCH_OCAML_TO_C
+               in runtime/power.S (-56 = linkage + param save + buffer). *)
+            `	addi	1, 1, -56\n`;
           if fp then begin
             `	stdu	12, {emit_int (-reserved_stack_space)}(1)\n`;
             (* Follow the back chain back to the OCaml stack. *)
@@ -900,16 +1225,16 @@ let emit_instr env i =
     | Lop(Iintop Isub) ->               (* subfc has swapped arguments *)
         `	subfc	{emit_reg i.res.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(0)}\n`
     | Lop(Iintop Imod) ->
-        `	divd	0, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
-        `	mulld	0, 0, {emit_reg i.arg.(1)}\n`;
+        `	{emit_string divg}	0, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+        `	{emit_string mullg}	0, 0, {emit_reg i.arg.(1)}\n`;
         `	subfc	{emit_reg i.res.(0)}, 0, {emit_reg i.arg.(0)}\n`
     | Lop(Iintop(Icomp cmp)) ->
         begin match cmp with
           Isigned c ->
-            `	cmpd	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+            `	{emit_string cmpg}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
             emit_set_comp c i.res.(0)
         | Iunsigned c ->
-            `	cmpld	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+            `	{emit_string cmplg}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
             emit_set_comp c i.res.(0)
         end
     | Lop(Icompf cmp) ->
@@ -917,12 +1242,12 @@ let emit_instr env i =
         emit_extract_crbit bitnum negated i.res.(0)
     | Lop(Iintop (Icheckbound)) ->
         let lbl = bound_error_label env i.dbg in
-        `	cmpld	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+        `	{emit_string cmplg}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         `	ble-	{emit_label lbl}\n`
     | Lop(Ispecific (Icheckbound_far)) ->
         let lbl_err = bound_error_label env i.dbg in
         let lbl_next = new_label() in
-        `	cmpld	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
+        `	{emit_string cmplg}	{emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`;
         `	bgt+	{emit_label lbl_next}\n`;
         `	b	{emit_label lbl_err}\n`;
         `{emit_label lbl_next}:\n`
@@ -934,20 +1259,20 @@ let emit_instr env i =
     | Lop(Iintop_imm(Icomp cmp, n)) ->
         begin match cmp with
           Isigned c ->
-            `	cmpdi	{emit_reg i.arg.(0)}, {emit_int n}\n`;
+            `	{emit_string cmpg}i	{emit_reg i.arg.(0)}, {emit_int n}\n`;
             emit_set_comp c i.res.(0)
         | Iunsigned c ->
-            `	cmpldi	{emit_reg i.arg.(0)}, {emit_int n}\n`;
+            `	{emit_string cmplgi}	{emit_reg i.arg.(0)}, {emit_int n}\n`;
             emit_set_comp c i.res.(0)
         end
     | Lop(Iintop_imm(Icheckbound, n)) ->
         let lbl = bound_error_label env i.dbg in
-        `	cmpldi	{emit_reg i.arg.(0)}, {emit_int n}\n`;
+        `	{emit_string cmplgi}	{emit_reg i.arg.(0)}, {emit_int n}\n`;
         `	ble-	{emit_label lbl}\n`
     | Lop(Ispecific(Icheckbound_imm_far n)) ->
         let lbl_err = bound_error_label env i.dbg in
         let lbl_next = new_label() in
-        `	cmpldi	{emit_reg i.arg.(0)}, {emit_int n}\n`;
+        `	{emit_string cmplgi}	{emit_reg i.arg.(0)}, {emit_int n}\n`;
         `	bgt+	{emit_label lbl_next}\n`;
         `	b	{emit_label lbl_err}\n`;
         `{emit_label lbl_next}:\n`
@@ -961,15 +1286,42 @@ let emit_instr env i =
         let instr = name_for_floatop2 op in
         `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}\n`
     | Lop(Ifloatofint) ->
-        (* Can use protected zone (288 bytes below r1 *)
-        `	std	{emit_reg i.arg.(0)}, -16(1)\n`;
-        `	lfd	{emit_reg i.res.(0)}, -16(1)\n`;
-        `	fcfid	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}\n`
+        if ppc64 then begin
+          (* Can use protected zone (288 bytes below r1 *)
+          `	std	{emit_reg i.arg.(0)}, -16(1)\n`;
+          `	lfd	{emit_reg i.res.(0)}, -16(1)\n`;
+          `	fcfid	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}\n`
+        end else begin
+          (* PPC32: convert int to float using the double-double trick.
+             We need a scratch FPR for the magic constant that is different
+             from the result register.  Both FPR0 and FPR1 are marked as
+             destroyed by Ifloatofint in proc.ml. *)
+          let lbl = new_label() in
+          let scratch =
+            if i.res.(0).loc = Reg 100 then 1 else 0 in
+          env.float_literals <- {fl=0x4330000080000000L; lbl} :: env.float_literals;
+          emit_label_load 11 lbl;
+          `	lis	0, 0x4330\n`;
+          `	stwu	0, -16(1)\n`;
+          `	xoris	0, {emit_reg i.arg.(0)}, 0x8000\n`;
+          `	stw	0, 4(1)\n`;
+          `	lfd	{emit_reg i.res.(0)}, 0(1)\n`;
+          `	addi	1, 1, 16\n`;
+          `	lfd	{emit_int scratch}, 0(11)\n`;
+          `	fsub	{emit_reg i.res.(0)}, {emit_reg i.res.(0)}, {emit_int scratch}\n`
+        end
     | Lop(Iintoffloat) ->
-        (* Can use protected zone (288 bytes below r1 *)
-        `	fctidz	0, {emit_reg i.arg.(0)}\n`;
-        `	stfd	0, -16(1)\n`;
-        `	ld	{emit_reg i.res.(0)}, -16(1)\n`
+        if ppc64 then begin
+          (* Can use protected zone (288 bytes below r1 *)
+          `	fctidz	0, {emit_reg i.arg.(0)}\n`;
+          `	stfd	0, -16(1)\n`;
+          `	ld	{emit_reg i.res.(0)}, -16(1)\n`
+        end else begin
+          `	fctiwz	0, {emit_reg i.arg.(0)}\n`;
+          `	stfdu	0, -16(1)\n`;
+          `	lwz	{emit_reg i.res.(0)}, 4(1)\n`;
+          `	addi	1, 1, 16\n`
+        end
     | Lop(Iopaque) ->
         assert (i.arg.(0).loc = i.res.(0).loc)
     | Lop(Ispecific Isqrtf) ->
@@ -986,26 +1338,32 @@ let emit_instr env i =
         `	{emit_string instr}	{emit_reg i.res.(0)}, {emit_reg i.arg.(0)}, {emit_reg i.arg.(1)}, {emit_reg i.arg.(2)}\n`
     | Lop (Idls_get) ->
         let offset = Domainstate.(idx_of_field Domain_dls_root) * 8 in
-        `	ld	{emit_reg i.res.(0)}, {emit_int offset}(30)\n`
+        `	{emit_string lg}	{emit_reg i.res.(0)}, {emit_int offset}(30)\n`
     | Lop (Iatomic_fetch_add) ->
         (* trailing lwsync is the release fence, #10995 *)
+        let larx = if ppc64 then "ldarx" else "lwarx" in
+        let stcx = if ppc64 then "stdcx." else "stwcx." in
         let lbl = new_label() in
         `	sync\n`;
         `{emit_label lbl}:\n`;
-        `	ldarx	{emit_reg i.res.(0)}, 0, {emit_reg i.arg.(0)}\n`;
+        `	{emit_string larx}	{emit_reg i.res.(0)}, 0, {emit_reg i.arg.(0)}\n`;
         `	add	0, {emit_reg i.res.(0)}, {emit_reg i.arg.(1)}\n`;
-        `	stdcx.	0, 0, {emit_reg i.arg.(0)}\n`;
+        `	{emit_string stcx}	0, 0, {emit_reg i.arg.(0)}\n`;
         `	bne-	{emit_label lbl}\n`;
         `	isync\n`;
         `	lwsync\n`
     | Lop (Ireturn_addr) ->
         if env.f.fun_frame_required then
-          emit_sp_mem "ld" emit_reg i.res.(0) (retaddr_offset env) 12
+          emit_sp_mem lg emit_reg i.res.(0) (retaddr_offset env) 12
         else
         `	mflr	{emit_reg i.res.(0)}\n`
     | Lreloadretaddr ->
-        emit_sp_mem "ld" emit_gpr 11 (retaddr_offset env) 11;
-        `	mtlr	11\n`
+        if env.f.fun_frame_required then begin
+          (* On PPC, always reload LR when a frame is required.
+             bltl- in allocation/poll checks unconditionally clobbers LR. *)
+          emit_sp_mem lg emit_gpr 11 (retaddr_offset env) 11;
+          `	mtlr	11\n`
+        end
     | Lreturn ->
         emit_free_frame env;
         `	blr\n`
@@ -1016,10 +1374,10 @@ let emit_instr env i =
     | Lcondbranch(tst, lbl) ->
         begin match tst with
           Itruetest ->
-            `	cmpdi	{emit_reg i.arg.(0)}, 0\n`;
+            `	{emit_string cmpg}i	{emit_reg i.arg.(0)}, 0\n`;
             `	bne	{emit_label lbl}\n`
         | Ifalsetest ->
-            `	cmpdi	{emit_reg i.arg.(0)}, 0\n`;
+            `	{emit_string cmpg}i	{emit_reg i.arg.(0)}, 0\n`;
             `	beq	{emit_label lbl}\n`
         | Iinttest cmp ->
             let (comp, branch) = name_for_int_comparison cmp in
@@ -1043,7 +1401,7 @@ let emit_instr env i =
             `	beq	{emit_label lbl}\n`
         end
     | Lcondbranch3(lbl0, lbl1, lbl2) ->
-        `	cmpdi	{emit_reg i.arg.(0)}, 1\n`;
+        `	{emit_string cmpg}i	{emit_reg i.arg.(0)}, 1\n`;
         begin match lbl0 with
           None -> ()
         | Some lbl -> `	blt	{emit_label lbl}\n`
@@ -1058,26 +1416,41 @@ let emit_instr env i =
         end
     | Lswitch jumptbl ->
         let lbl = new_label() in
-        let jumptables_lbl = match env.jumptables_lbl with
-            | None ->
-              env.jumptables_lbl <- Some lbl;
-              assert (List.length env.jumptables = 0);
-              lbl
-            | Some l -> l in
-        let start = List.length env.jumptables in
-        let (start_lo, start_hi) = low_high_s start in
-        emit_tocload emit_gpr 11 (TocLabel jumptables_lbl);
-        `	addi	12, {emit_reg i.arg.(0)}, {emit_int start_lo}\n`;
-        if start_hi <> 0 then
-          `	addis	12, 12, {emit_int start_hi}\n`;
-        `	sldi	12, 12, 2\n`;
-        `	lwax	0, 11, 12\n`;
-        `	add	0, 11, 0\n`;
-        `	mtctr	0\n`;
-        `	bctr\n`;
-        env.jumptables <- List.rev_append (Array.to_list jumptbl) env.jumptables
+        if ppc64 then begin
+          let jumptables_lbl = match env.jumptables_lbl with
+              | None ->
+                env.jumptables_lbl <- Some lbl;
+                assert (List.length env.jumptables = 0);
+                lbl
+              | Some l -> l in
+          let start = List.length env.jumptables in
+          let (start_lo, start_hi) = low_high_s start in
+          emit_tocload emit_gpr 11 (TocLabel jumptables_lbl);
+          `	addi	12, {emit_reg i.arg.(0)}, {emit_int start_lo}\n`;
+          if start_hi <> 0 then
+            `	addis	12, 12, {emit_int start_hi}\n`;
+          `	sldi	12, 12, 2\n`;
+          `	lwax	0, 11, 12\n`;
+          `	add	0, 11, 0\n`;
+          `	mtctr	0\n`;
+          `	bctr\n`;
+          env.jumptables <- List.rev_append (Array.to_list jumptbl) env.jumptables
+        end else begin
+          emit_label_load 11 lbl;
+          `	slwi	12, {emit_reg i.arg.(0)}, 2\n`;
+          `	{emit_string lwa}x	0, 11, 12\n`;
+          `	add	0, 11, 0\n`;
+          `	mtctr	0\n`;
+          `	bctr\n`;
+          emit_string rodata_space;
+          `{emit_label lbl}:`;
+          for j = 0 to Array.length jumptbl - 1 do
+            `	.long	{emit_label jumptbl.(j)} - {emit_label lbl}\n`
+          done;
+          emit_named_text_section env.f.fun_name
+        end
     | Lentertrap ->
-        emit_reload_toc env;
+        if ppc64 then emit_reload_toc env;
         (* After exception unwinding, FP (r31) is stale. Restore FP = SP, but
            only when this function established a frame pointer. *)
         if fp && env.f.fun_frame_required then
@@ -1085,23 +1458,33 @@ let emit_instr env i =
     | Ladjust_trap_depth { delta_traps } ->
         adjust_stack_offset env (trap_size * delta_traps)
     | Lpushtrap { lbl_handler; } ->
-        if fp then begin
-          (* stdu (not addi) so the frame walker can traverse trap frames.
-             Clear the parent LR save slot (parent_SP + 16) so stale data
-             there is not mistaken for a return address. *)
-          `	stdu	1, {emit_int (-trap_size)}(1)\n`;
-          `	li	0, 0\n`;
-          `	std	0, {emit_int (trap_size + 16)}(1)\n`
-        end
-        else
+        begin match abi with
+        | ELF32 ->
           `	addi	1, 1, {emit_int (-trap_size)}\n`;
-        adjust_stack_offset env trap_size;
-        `	std	29, {emit_int reserved_stack_space}(1)\n`;
-        emit_tocload emit_gpr 29 (TocLabel lbl_handler);
-        `	std	29, {emit_int (reserved_stack_space + 8)}(1)\n`;
-        `	addi	29, 1, {emit_int reserved_stack_space}\n`
+          adjust_stack_offset env trap_size;
+          `	stw	29, {emit_int reserved_stack_space}(1)\n`;
+          emit_label_load 29 lbl_handler;
+          `	stw	29, {emit_int (reserved_stack_space + size_int)}(1)\n`;
+          `	addi	29, 1, {emit_int reserved_stack_space}\n`
+        | ELF64v1 | ELF64v2 ->
+          if fp then begin
+            (* stdu (not addi) so the frame walker can traverse trap frames.
+               Clear the parent LR save slot (parent_SP + 16) so stale data
+               there is not mistaken for a return address. *)
+            `	stdu	1, {emit_int (-trap_size)}(1)\n`;
+            `	li	0, 0\n`;
+            `	std	0, {emit_int (trap_size + 16)}(1)\n`
+          end
+          else
+            `	addi	1, 1, {emit_int (-trap_size)}\n`;
+          adjust_stack_offset env trap_size;
+          `	std	29, {emit_int reserved_stack_space}(1)\n`;
+          emit_tocload emit_gpr 29 (TocLabel lbl_handler);
+          `	std	29, {emit_int (reserved_stack_space + 8)}(1)\n`;
+          `	addi	29, 1, {emit_int reserved_stack_space}\n`
+        end
     | Lpoptrap ->
-        `	ld	29, {emit_int reserved_stack_space}(1)\n`;
+        `	{emit_string lg}	29, {emit_int reserved_stack_space}(1)\n`;
         `	addi	1, 1, {emit_int trap_size}\n`;
         adjust_stack_offset env (-trap_size)
     | Lraise k ->
@@ -1115,10 +1498,10 @@ let emit_instr env i =
             record_frame env Reg.Set.empty (Dbg_raise i.dbg);
             emit_call_nop()
         | Lambda.Raise_notrace ->
-            `	ld	0, 8(29)\n`;
+            `	{emit_string lg}	0, {emit_int size_int}(29)\n`;
             `	addi	1, 29, {emit_int (trap_size - reserved_stack_space)}\n`;
             `	mtctr	0\n`;
-            `	ld	29, {emit_int (reserved_stack_space - trap_size)}(1)\n`;
+            `	{emit_string lg}	29, {emit_int (reserved_stack_space - trap_size)}(1)\n`;
             `	bctr\n`
         end
 
@@ -1149,14 +1532,19 @@ let max_out_of_line_code_offset fundecl =
     | _ -> num_checkbounds count instr.next in
   let num_chk = num_checkbounds 0 fundecl.fun_body in
   (* This is what the end of the function looks like:
-        - offset 0: call GC point  (5 insn)
-        - offset 5: first (or only if not !Clflags.debug) call bound error
-                    (2 insns)
-        - offsets 7, 9, .. : second, third, ..., call bound error
-                    (2 insns each) *)
+        - offset 0: call GC point  (gc_size insn)
+        - offset gc_size: first (or only if not !Clflags.debug) call bound error
+                    (be_size insns)
+        - further offsets: second, third, ..., call bound error
+                    (be_size insns each)
+     In PIC mode on ELF32, GOT-indirect calls are larger. *)
+  let gc_size =
+    if abi = ELF32 && use_got () then 9 else 5 in
+  let be_size =
+    if abi = ELF32 && use_got () then 9 else 2 in
   if num_chk = 0 then 0
-  else if !Clflags.debug then 5 + (num_chk - 1) * 2
-  else 5
+  else if !Clflags.debug then gc_size + (num_chk - 1) * be_size
+  else gc_size
 
 (* Emission of a function declaration *)
 
@@ -1165,10 +1553,10 @@ let fundecl fundecl =
   emit_named_text_section fundecl.fun_name;
   `	.align	2\n`;
   (* Dynamic stack checking *)
-  let stack_threshold_size = Config.stack_threshold * 8 in (* bytes *)
+  let stack_threshold_size = Config.stack_threshold * size_addr in (* bytes *)
   (* The generic stack-usage analysis models each outgoing-argument region as
      [n] bytes, but [Istackoffset] reserves [n + reserved_stack_space] (the
-     ELFv2 linkage area for the callee) which the analysis does not account for.
+     ABI linkage area for the callee) which the analysis does not account for.
      Outgoing-argument regions are never nested, so adding a single
      [reserved_stack_space] whenever any extra stack is used covers the deepest
      region and keeps the stack-overflow check conservative. *)
@@ -1177,6 +1565,7 @@ let fundecl fundecl =
     + (if fundecl.fun_extra_stack_used > 0 then reserved_stack_space else 0) in
   let handle_overflow = ref None in
   if fundecl.fun_contains_nontail_calls
+  || fundecl.fun_frame_required
   || max_frame_size >= stack_threshold_size then begin
     let overflow = new_label () and ret = new_label () in
     (* The return address is saved in a register not used for param passing *)
@@ -1194,21 +1583,25 @@ let fundecl fundecl =
   emit_type_directive fundecl.fun_name "@function";
   `{emit_symbol fundecl.fun_name}:\n`;
   cfi_startproc();
-  `0:	addis	2, 12, (.TOC. - 0b)@ha\n`;
-  `	addi	2, 2, (.TOC. - 0b)@l\n`;
-  `	.localentry {emit_symbol fundecl.fun_name}, . - 0b\n`;
+  begin match abi with
+  | ELF32 -> ()
+  | ELF64v1 | ELF64v2 ->
+    `0:	addis	2, 12, (.TOC. - 0b)@ha\n`;
+    `	addi	2, 2, (.TOC. - 0b)@l\n`;
+    `	.localentry {emit_symbol fundecl.fun_name}, . - 0b\n`
+  end;
   emit_debug_info fundecl.fun_dbg;
   (* Dynamic stack checking *)
   begin match !handle_overflow with
   | None -> ()
   | Some(overflow, ret) ->
       let threshold_offset =
-        Domainstate.stack_ctx_words * 8 + stack_threshold_size in
+        Domainstate.stack_ctx_words * size_addr + stack_threshold_size in
       let f = max_frame_size + threshold_offset in
       let offset = Domainstate.(idx_of_field Domain_current_stack) * 8 in
-      `	ld	11, {emit_int offset}(30)\n`;
+      `	{emit_string lg}	11, {emit_int offset}(30)\n`;
       emit_addi_inplace 11 f;
-      `	cmpld	1, 11\n`;
+      `	{emit_string cmplg}	1, 11\n`;
       `	ble-	{emit_label overflow}\n`;
       `{emit_label ret}:\n`
   end;
@@ -1218,11 +1611,21 @@ let fundecl fundecl =
   (* Emit the glue code to call the GC *)
   if env.call_gc_label > 0 then begin
     `{emit_label env.call_gc_label}:\n`;
-    `	std	2, 24(1)\n`;
-             (* save our TOC, will be restored by caml_call_gc *)
-    emit_tocload emit_gpr 12 (TocSym "caml_call_gc");
-    `	mtctr	12\n`;
-    `	bctr\n`
+    begin match abi with
+    | ELF32 when use_got () ->
+      (* GOT-indirect jump to caml_call_gc for shared libraries *)
+      emit_symbol_load_got emit_gpr 11 "caml_call_gc";
+      `	mtctr	11\n`;
+      `	bctr\n`
+    | ELF32 ->
+      `	b	{emit_symbol "caml_call_gc"}\n`
+    | ELF64v1 | ELF64v2 ->
+      `	std	2, 24(1)\n`;
+               (* save our TOC, will be restored by caml_call_gc *)
+      emit_tocload emit_gpr 12 (TocSym "caml_call_gc");
+      `	mtctr	12\n`;
+      `	bctr\n`
+    end
   end;
   (* Emit the glue code to handle bound errors *)
   emit_call_bound_errors env;
@@ -1269,13 +1672,15 @@ let emit_item = function
   | Cint32 n ->
       `	.long	{emit_nativeint n}\n`
   | Cint n ->
-      `	.quad	{emit_nativeint n}\n`
+      `	{emit_string datag}	{emit_nativeint n}\n`
   | Csingle f ->
       emit_float32_directive ".long" (Int32.bits_of_float f)
   | Cdouble f ->
-      emit_float64_directive ".quad" (Int64.bits_of_float f)
+      if ppc64
+      then emit_float64_directive ".quad" (Int64.bits_of_float f)
+      else emit_float64_split_directive ".long" (Int64.bits_of_float f)
   | Csymbol_address s ->
-      `	.quad	{emit_symbol s}\n`
+      `	{emit_string datag}	{emit_symbol s}\n`
   | Cstring s ->
       emit_bytes_directive "	.byte	" s
   | Cskip n ->
@@ -1285,7 +1690,7 @@ let emit_item = function
 
 let data l =
   emit_string data_space;
-  `	.align  3\n`;
+  `	.align  {emit_int (if ppc64 then 3 else 2)}\n`;
   List.iter emit_item l
 
 (* Beginning / end of an assembly file *)
@@ -1293,8 +1698,11 @@ let data l =
 let begin_assembly() =
   reset_debug_info();
   `	.file	\"\"\n`;  (* PR#7037 *)
-  `	.abiversion 2\n`;
+  if abi = ELF64v2 then
+    `	.abiversion 2\n`;
   Hashtbl.clear tocref_entries;
+  Hashtbl.clear got2_entries;
+  got2_toc_label := new_label();
   (* Emit the beginning of the segments *)
   let lbl_begin = Compilenv.make_symbol (Some "data_begin") in
   emit_string data_space;
@@ -1315,24 +1723,24 @@ let end_assembly() =
   emit_string data_space;
   let lbl_end = Compilenv.make_symbol (Some "data_end") in
   declare_global_data lbl_end;
-  `	.quad	0\n`;  (* PR#6329 *)
+  `	{emit_string datag}	0\n`;  (* PR#6329 *)
   `{emit_symbol lbl_end}:\n`;
-  `	.quad	0\n`;
+  `	{emit_string datag}	0\n`;
   (* Emit the frame descriptors *)
   emit_string data_space;  (* not rodata_space because it contains relocations *)
-  `	.align  3\n`;   (* #7887 *)
+  `	.align  {emit_int (if ppc64 then 3 else 2)}\n`;   (* #7887 *)
   let lbl = Compilenv.make_symbol (Some "frametable") in
   declare_global_data lbl;
   `{emit_symbol lbl}:\n`;
   emit_frames
     { efa_code_label =
-         (fun l -> `	.quad	{emit_label l}\n`);
+         (fun l -> `	{emit_string datag}	{emit_label l}\n`);
       efa_data_label =
-         (fun l -> `	.quad	{emit_label l}\n`);
+         (fun l -> `	{emit_string datag}	{emit_label l}\n`);
       efa_8 = (fun n -> `	.byte	{emit_int n}\n`);
       efa_16 = (fun n -> `	.short	{emit_int n}\n`);
       efa_32 = (fun n -> `	.long	{emit_int32 n}\n`);
-      efa_word = (fun n -> `	.quad	{emit_int n}\n`);
+      efa_word = (fun n -> `	{emit_string datag}	{emit_int n}\n`);
       efa_align = (fun n -> `	.balign	{emit_int n}\n`);
       efa_label_rel = (fun lbl ofs ->
                            `	.long	({emit_label lbl} - .) + {emit_int32 ofs}\n`);
@@ -1340,8 +1748,15 @@ let end_assembly() =
       efa_string = (fun s -> emit_bytes_directive "	.byte	" (s ^ "\000"))
      };
   emit_size_directive lbl;
-  (* Emit the TOC entries *)
-  emit_string toc_space;
-  emit_toctable();
+  (* Emit the TOC entries (PPC64) *)
+  if ppc64 then begin
+    emit_string toc_space;
+    emit_toctable()
+  end;
   Hashtbl.clear tocref_entries;
+  (* Emit the .got2 table (PPC32 ELF32 PIC) *)
+  if abi = ELF32 then begin
+    emit_got2table();
+    Hashtbl.clear got2_entries
+  end;
   emit_nonexecstack_note ()
