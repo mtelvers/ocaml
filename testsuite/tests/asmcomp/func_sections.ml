@@ -11,7 +11,13 @@
    native;
  }{
    arch_power;
+   arch64;
    reference = "${test_source_directory}/func_sections.no_jump_tables_in_rodata.reference";
+   native;
+ }{
+   arch_power;
+   arch32;
+   reference = "${test_source_directory}/func_sections.reference";
    native;
  }{
    arch_riscv;
