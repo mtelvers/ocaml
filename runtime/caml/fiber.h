@@ -102,8 +102,11 @@ struct stack_info {
   #if defined(MODEL_ppc)
     /* PPC32 ELF ABI: no reserved space in c_stack_link */
     #define Reserved_space_c_stack_link 0
+  #elif defined(MODEL_ppc64)
+    /* PPC64 ELF64v1 ABI: 6 reserved quadwords at bottom of C stack */
+    #define Reserved_space_c_stack_link 6 * 8
   #else
-    /* PPC64 ELF ABI: 4 reserved quadwords at bottom of C stack */
+    /* PPC64 ELF64v2 ABI: 4 reserved quadwords at bottom of C stack */
     #define Reserved_space_c_stack_link 4 * 8
   #endif
 #else
