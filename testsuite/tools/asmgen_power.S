@@ -131,7 +131,199 @@ caml_c_call:
         mtctr   25
         bctr
 
-#else /* PPC64 */
+        .globl caml_c_call_stack_args
+        .type caml_c_call_stack_args, @function
+        .align 2
+caml_c_call_stack_args:
+    /* C call with stack arguments (PPC32).
+       r25 = C function address
+       r24 = stack_ofs (bytes of stack arguments)
+       Stack args are at caller SP + RESERVED_STACK .. + RESERVED_STACK + r24 */
+    /* Save return address */
+        mflr    27
+        stw     27, LR_SAVE_AREA(1)
+    /* Save old SP */
+        mr      28, 1
+    /* Grow stack by r24 bytes */
+        neg     0, 24
+        stwux   1, 1, 0
+    /* Copy stack args from old frame to new frame */
+        addi    11, 24, RESERVED_STACK - 4
+1:      lwzx    0, 28, 11
+        stwx    0, 1, 11
+        addi    11, 11, -4
+        cmpwi   11, RESERVED_STACK
+        bge     1b
+    /* Call C function */
+        mtctr   25
+        bctrl
+    /* Restore SP */
+        lwz     1, 0(1)
+    /* Restore LR and return */
+        mtlr    27
+        blr
+
+#elif defined(MODEL_ppc64) /* PPC64 ELFv1 */
+
+#define RESERVED_STACK 48
+#define LR_SAVE_AREA 16
+
+/* ELFv1 function definitions: use .opd descriptors */
+
+#define FUNCTION(name) \
+  .section ".opd","aw"; \
+  .align 3; \
+  .globl name; \
+  .type name, @function; \
+  name: ; \
+  .quad .L.name,.TOC.@tocbase,0; \
+  .size name, 24; \
+  .previous; \
+  .section ".text"; \
+  .align 2; \
+  .L.name:
+
+FUNCTION(call_gen_code)
+    /* Allocate and link stack frame */
+        stdu    1, -(8*18 + 8*18 + RESERVED_STACK)(1)
+    /* 18 saved GPRs, 18 saved FPRs */
+    /* Save return address */
+        mflr    0
+        std     0, (8*18 + 8*18 + RESERVED_STACK + LR_SAVE_AREA)(1)
+    /* Save all callee-save registers, starting at RESERVED_STACK */
+        addi    11, 1, RESERVED_STACK - 8
+        stdu    14, 8(11)
+        stdu    15, 8(11)
+        stdu    16, 8(11)
+        stdu    17, 8(11)
+        stdu    18, 8(11)
+        stdu    19, 8(11)
+        stdu    20, 8(11)
+        stdu    21, 8(11)
+        stdu    22, 8(11)
+        stdu    23, 8(11)
+        stdu    24, 8(11)
+        stdu    25, 8(11)
+        stdu    26, 8(11)
+        stdu    27, 8(11)
+        stdu    28, 8(11)
+        stdu    29, 8(11)
+        stdu    30, 8(11)
+        stdu    31, 8(11)
+        stfdu   14, 8(11)
+        stfdu   15, 8(11)
+        stfdu   16, 8(11)
+        stfdu   17, 8(11)
+        stfdu   18, 8(11)
+        stfdu   19, 8(11)
+        stfdu   20, 8(11)
+        stfdu   21, 8(11)
+        stfdu   22, 8(11)
+        stfdu   23, 8(11)
+        stfdu   24, 8(11)
+        stfdu   25, 8(11)
+        stfdu   26, 8(11)
+        stfdu   27, 8(11)
+        stfdu   28, 8(11)
+        stfdu   29, 8(11)
+        stfdu   30, 8(11)
+        stfdu   31, 8(11)
+    /* Get function pointer in CTR */
+        mtctr   3
+        mr      12, 3
+    /* Shuffle arguments */
+        mr      3, 4
+        mr      4, 5
+        mr      5, 6
+        mr      6, 7
+    /* Call the function */
+        bctrl
+    /* Restore callee-save registers */
+        addi    11, 1, RESERVED_STACK - 8
+        ldu     14, 8(11)
+        ldu     15, 8(11)
+        ldu     16, 8(11)
+        ldu     17, 8(11)
+        ldu     18, 8(11)
+        ldu     19, 8(11)
+        ldu     20, 8(11)
+        ldu     21, 8(11)
+        ldu     22, 8(11)
+        ldu     23, 8(11)
+        ldu     24, 8(11)
+        ldu     25, 8(11)
+        ldu     26, 8(11)
+        ldu     27, 8(11)
+        ldu     28, 8(11)
+        ldu     29, 8(11)
+        ldu     30, 8(11)
+        ldu     31, 8(11)
+        lfdu    14, 8(11)
+        lfdu    15, 8(11)
+        lfdu    16, 8(11)
+        lfdu    17, 8(11)
+        lfdu    18, 8(11)
+        lfdu    19, 8(11)
+        lfdu    20, 8(11)
+        lfdu    21, 8(11)
+        lfdu    22, 8(11)
+        lfdu    23, 8(11)
+        lfdu    24, 8(11)
+        lfdu    25, 8(11)
+        lfdu    26, 8(11)
+        lfdu    27, 8(11)
+        lfdu    28, 8(11)
+        lfdu    29, 8(11)
+        lfdu    30, 8(11)
+        lfdu    31, 8(11)
+    /* Reload return address */
+        ld      0, (8*18 + 8*18 + RESERVED_STACK + LR_SAVE_AREA)(1)
+        mtlr    0
+    /* Return */
+        addi    1, 1, (8*18 + 8*18 + RESERVED_STACK)
+        blr
+
+FUNCTION(caml_c_call)
+    /* Jump to C function (address in r25, matching C_CALL_FUN).
+       On ELFv1, r25 holds the .opd descriptor address;
+       dereference for entry point and TOC. */
+        ld      0, 0(25)
+        ld      2, 8(25)
+        mtctr   0
+        bctr
+
+FUNCTION(caml_c_call_stack_args)
+    /* C call with stack arguments.
+       r25 = C function .opd descriptor address
+       r24 = stack_ofs (bytes of stack arguments)
+       Stack args are at caller SP + RESERVED_STACK .. + RESERVED_STACK + r24 */
+    /* Save return address */
+        mflr    27
+        std     27, LR_SAVE_AREA(1)
+    /* Save old SP */
+        mr      28, 1
+    /* Grow stack by r24 bytes */
+        neg     0, 24
+        stdux   1, 1, 0
+    /* Copy stack args from old frame to new frame */
+        addi    11, 24, RESERVED_STACK - 8
+1:      ldx     0, 28, 11
+        stdx    0, 1, 11
+        addi    11, 11, -8
+        cmpdi   11, RESERVED_STACK
+        bge     1b
+    /* Call C function via .opd descriptor */
+        ld      0, 0(25)
+        ld      2, 8(25)
+        mtctr   0
+        bctrl
+    /* Restore SP */
+        ld      1, 0(1)
+    /* Restore LR and return */
+        mtlr    27
+        blr
+
+#else /* PPC64 ELFv2 */
 
 #define RESERVED_STACK 32
 #define LR_SAVE_AREA 16
@@ -249,10 +441,40 @@ FUNCTION(call_gen_code)
         blr
 
 FUNCTION(caml_c_call)
-    /* Jump to C function (address in r28) */
-        mtctr   28
-        mr      12, 28
+    /* Jump to C function (address in r25, matching C_CALL_FUN) */
+        mtctr   25
+        mr      12, 25
         bctr
+
+FUNCTION(caml_c_call_stack_args)
+    /* C call with stack arguments.
+       r25 = C function address
+       r24 = stack_ofs (bytes of stack arguments)
+       Stack args are at caller SP + RESERVED_STACK .. + RESERVED_STACK + r24 */
+    /* Save return address */
+        mflr    27
+        std     27, LR_SAVE_AREA(1)
+    /* Save old SP */
+        mr      28, 1
+    /* Grow stack by r24 bytes */
+        neg     0, 24
+        stdux   1, 1, 0
+    /* Copy stack args from old frame to new frame */
+        addi    11, 24, RESERVED_STACK - 8
+1:      ldx     0, 28, 11
+        stdx    0, 1, 11
+        addi    11, 11, -8
+        cmpdi   11, RESERVED_STACK
+        bge     1b
+    /* Call C function */
+        mtctr   25
+        mr      12, 25
+        bctrl
+    /* Restore SP */
+        ld      1, 0(1)
+    /* Restore LR and return */
+        mtlr    27
+        blr
 
 #endif /* MODEL_ppc */
 

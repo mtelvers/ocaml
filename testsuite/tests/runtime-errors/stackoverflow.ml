@@ -1,6 +1,7 @@
 (* TEST
  flags = "-w -a";
- ocamlrunparam += "l=100000";
+ if arch_power then ocamlrunparam += "l=2000000"
+ else ocamlrunparam += "l=100000";
  not tsan; (* TSan does not support call stacks bigger than 64k frames *)
  {
    bytecode;
