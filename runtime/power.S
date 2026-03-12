@@ -22,10 +22,12 @@
 
 #if defined(MODEL_ppc)
 /* PPC32 ELF32 ABI */
+#elif defined(MODEL_ppc64) && _CALL_ELF == 1
+/* PPC64 ELF64v1 ABI (big-endian) */
 #elif defined(MODEL_ppc64le) && _CALL_ELF == 2
-/* PPC64 ELF64v2 ABI */
+/* PPC64 ELF64v2 ABI (little-endian) */
 #else
-#error "This POWER port requires ELF32 (ppc) or ELFv2 (ppc64le)"
+#error "This POWER port requires ELF32 (ppc), ELFv1 (ppc64), or ELFv2 (ppc64le)"
 #endif
 
 /* Helpers for 32/64-bit portability */
@@ -92,7 +94,19 @@
 #define TRAP_HANDLER_OFFSET 4
 #define TRAP_PREVIOUS_OFFSET 0
 #define CALLBACK_LINK_SIZE 16
+#elif defined(MODEL_ppc64)
+/* PPC64 ELF64v1 ABI: 48 bytes reserved at bottom of each stack frame
+   (back chain, CR save, LR save, reserved, reserved, TOC save) */
+#define RESERVED_STACK 48
+#define LR_SAVE 16
+#define TOC_SAVE_PARENT 8
+#define TOC_SAVE 24
+#define TRAP_SIZE 16
+#define TRAP_HANDLER_OFFSET 8
+#define TRAP_PREVIOUS_OFFSET 0
+#define CALLBACK_LINK_SIZE 32
 #else
+/* PPC64 ELF64v2 ABI: 32 bytes reserved at bottom of each stack frame */
 #define RESERVED_STACK 32
 #define LR_SAVE 16
 #define TOC_SAVE_PARENT 8
@@ -128,7 +142,14 @@
 #define Cstack_sp(reg)          4(reg)
 #define Cstack_sp_offset        4
 #define Cstack_prev(reg)        8(reg)
+#elif defined(MODEL_ppc64)
+/* PPC64 ELF64v1: 48 bytes reserved (6 quadwords) */
+#define Cstack_stack(reg)       48(reg)
+#define Cstack_sp(reg)          56(reg)
+#define Cstack_sp_offset        56
+#define Cstack_prev(reg)        64(reg)
 #else
+/* PPC64 ELF64v2: 32 bytes reserved (4 quadwords) */
 #define Cstack_stack(reg)       32(reg)
 #define Cstack_sp(reg)          40(reg)
 #define Cstack_sp_offset        40
@@ -196,6 +217,19 @@ caml_hot__code_end:
         .align 2
 \name:
 .endm
+#elif defined(MODEL_ppc64)
+.macro FUNCTION name
+        .section ".opd","aw"
+        .align 3
+        .globl \name
+        TYPE_DIRECTIVE(\name,@function)
+\name:
+        .quad .L.\name,.TOC.@tocbase,0
+        .size \name,24
+        .previous
+        TEXT_SECTION \name
+.L.\name:
+.endm
 #else
 .macro FUNCTION name
         TEXT_SECTION \name
@@ -208,9 +242,47 @@ caml_hot__code_end:
 .endm
 #endif
 
+#if defined(MODEL_ppc64)
+.macro ENDFUNCTION name
+        .size .L.\name, .-.L.\name
+.endm
+#else
 .macro ENDFUNCTION name
         SIZE_DIRECTIVE(\name)
 .endm
+#endif
+
+/* OCAML_FUNCTION / ENDOCAML_FUNCTION: for runtime functions called from
+   OCaml code (via Capply or direct bl).  On ELFv1, these must NOT have
+   .opd descriptors since OCaml callers branch to the symbol directly.
+   On ELF32 and ELFv2, these are identical to FUNCTION/ENDFUNCTION. */
+#if defined(MODEL_ppc64)
+.macro OCAML_FUNCTION name
+        TEXT_SECTION \name
+        .globl \name
+        TYPE_DIRECTIVE(\name,@function)
+        .align 2
+\name:
+.endm
+.macro ENDOCAML_FUNCTION name
+        SIZE_DIRECTIVE(\name)
+.endm
+#else
+.macro OCAML_FUNCTION name
+        TEXT_SECTION \name
+        .globl \name
+        TYPE_DIRECTIVE(\name,@function)
+\name:
+#if !defined(MODEL_ppc)
+0:      addis   2, 12, .TOC.- 0b@ha
+        addi    2, 2,  .TOC.- 0b@l
+        .localentry \name, . - \name
+#endif
+.endm
+.macro ENDOCAML_FUNCTION name
+        SIZE_DIRECTIVE(\name)
+.endm
+#endif
 
 .macro OBJECT name
         .globl \name
@@ -334,10 +406,22 @@ caml_hot__code_end:
 #if defined(MODEL_ppc)
 #define Far_call(fn) bl fn
 #define Far_tailcall(fn) mflr 0; Addrglobal(TMP, fn); mtlr 0; mtctr TMP; bctr
+#elif defined(MODEL_ppc64)
+/* ELFv1: OCaml functions have no .opd descriptor (symbol is on the code),
+   so Far_tailcall works like ELFv2.  Far_call uses bl+nop which the
+   linker resolves through PLT stubs for .opd-bearing C functions. */
+#define Far_call(fn) bl fn; nop
+#define Far_tailcall(fn) Addrglobal(12, fn); mtctr 12; bctr
 #else
+/* ELFv2: TOC entry points directly to code. */
 #define Far_call(fn) bl fn; nop
 #define Far_tailcall(fn) Addrglobal(12, fn); mtctr 12; bctr
 #endif
+
+/* Load an OCaml function's code entry point.
+   OCaml functions have no .opd descriptor on ELFv1, so their
+   TOC/GOT entries point directly to the code. */
+#define Addrfunc(reg,fn) Addrglobal(reg, fn)
 
 /* Switch from OCaml stack to C stack */
 
@@ -357,6 +441,13 @@ caml_hot__code_end:
       We must place SP far enough below c_stack_link that this area doesn't
       overlap with the structure. Use -56 to be safe (8 linkage + 32 params + 16 buffer). */
        addi    SP, TMP2, -56
+#elif defined(MODEL_ppc64)
+   /* On PPC64 ELFv1, the C ABI mandates a parameter save area at SP+48
+      (48 bytes linkage area + 64 bytes for 8 parameter slots = 112 bytes).
+      c_stack_link fields start at offset 48 (stack), 56 (sp), 64 (prev),
+      so C callees writing to the parameter save area would corrupt them.
+      Offset SP below c_stack_link by 112 bytes to prevent overlap. */
+       addi    SP, TMP2, -112
 #else
        mr      SP, TMP2
 #ifdef ASM_CFI_SUPPORTED
@@ -379,6 +470,9 @@ caml_hot__code_end:
 #if defined(MODEL_ppc)
    /* Undo the -56 offset we applied in SWITCH_OCAML_TO_C, then read Cstack_sp */
        lg      SP, (Cstack_sp_offset + 56)(SP)
+#elif defined(MODEL_ppc64)
+   /* Undo the -112 offset we applied in SWITCH_OCAML_TO_C */
+       lg      SP, (Cstack_sp_offset + 112)(SP)
 #else
        lg      SP, Cstack_sp(SP)
 #endif
@@ -827,13 +921,20 @@ FUNCTION caml_c_call
         stg     ALLOC_PTR, Caml_state(young_ptr)
         stg     TRAP_PTR, Caml_state(exn_handler)
     /* Call C function (address in C_CALL_FUN) */
+#if defined(MODEL_ppc64)
+    /* ELFv1: C_CALL_FUN holds descriptor address; dereference for entry+TOC */
+        ld      0, 0(C_CALL_FUN)
+        mr      C_CALL_TOC, 2   /* save current TOC in a callee-save register */
+        ld      2, 8(C_CALL_FUN)  /* load callee's TOC from descriptor */
+        mtctr   0
+        bctrl
+        mr      2, C_CALL_TOC   /* restore current TOC */
+#elif !defined(MODEL_ppc)
+    /* ELFv2: r12 must hold function address for local entry computation */
         mtctr   C_CALL_FUN
-#if !defined(MODEL_ppc)
         mr      12, C_CALL_FUN
         mr      C_CALL_TOC, 2   /* save current TOC in a callee-save register */
-#endif
         bctrl
-#if !defined(MODEL_ppc)
         mr      2, C_CALL_TOC   /* restore current TOC */
 #ifdef WITH_FRAME_POINTERS
     /* Pop the frame we created */
@@ -845,6 +946,10 @@ FUNCTION caml_c_call
            DW_OP_breg + DW_REG_sp, Cstack_sp_offset, DW_OP_deref
 #endif
 #endif
+#else
+    /* PPC32: simple indirect call */
+        mtctr   C_CALL_FUN
+        bctrl
 #endif
     /* Restore return address (in register C_CALL_RET_ADDR, preserved by C) */
         mtlr    C_CALL_RET_ADDR
@@ -937,11 +1042,11 @@ FUNCTION caml_c_call_stack_args
         cmpwi   TMP, RESERVED_STACK
         bge     1b
 #else
-        addi    TMP, STACK_ARG_BYTES, 32 - 8
+        addi    TMP, STACK_ARG_BYTES, RESERVED_STACK - 8
 1:      ldx     0, C_CALL_TOC, TMP
         stdx    0, SP, TMP
         addi    TMP, TMP, -8
-        cmpdi   TMP, 32
+        cmpdi   TMP, RESERVED_STACK
         bge     1b
 #ifdef WITH_FRAME_POINTERS
    /* Save return address in OCaml caller's frame for frame pointer walking.
@@ -952,14 +1057,23 @@ FUNCTION caml_c_call_stack_args
 #endif
 #endif
     /* Call C function (address in C_CALL_FUN) */
+#if defined(MODEL_ppc64)
+    /* ELFv1: C_CALL_FUN holds descriptor address; dereference for entry+TOC */
+        ld      0, 0(C_CALL_FUN)
+        mr      C_CALL_TOC, 2
+        ld      2, 8(C_CALL_FUN)
+        mtctr   0
+        bctrl
+        mr      2, C_CALL_TOC
+#elif !defined(MODEL_ppc)
         mtctr   C_CALL_FUN
-#if !defined(MODEL_ppc)
         mr      12, C_CALL_FUN
         mr      C_CALL_TOC, 2   /* save current TOC in a callee-save register */
-#endif
         bctrl
-#if !defined(MODEL_ppc)
         mr      2, C_CALL_TOC   /* restore current TOC */
+#else
+        mtctr   C_CALL_FUN
+        bctrl
 #endif
     /* Pop the extra stack space used */
         add     SP, SP, STACK_ARG_BYTES
@@ -1011,8 +1125,16 @@ FUNCTION caml_raise_exn
         mflr    4               /* arg2: PC of raise */
         mr      5, SP           /* arg3: SP of raise */
         mr      6, TRAP_PTR     /* arg4: SP of handler */
-    /* Switch to C stack and call caml_stash_backtrace */
+    /* Switch to C stack and call caml_stash_backtrace.
+       Must offset SP below c_stack_link so the C ABI parameter save area
+       does not overlap with c_stack_link fields (stack, sp, prev).
+       Same offsets as SWITCH_OCAML_TO_C. */
         lg      SP, Caml_state(c_stack)
+#if defined(MODEL_ppc)
+        addi    SP, SP, -56
+#elif defined(MODEL_ppc64)
+        addi    SP, SP, -112
+#endif
         Far_call(caml_stash_backtrace)
     /* Restore exception bucket and raise */
         mr      3, 27
@@ -1119,7 +1241,7 @@ FUNCTION caml_start_program
         Addrglobal(START_PRG_ARG, caml_program)
         mtlr    0
 #else
-        Addrglobal(START_PRG_ARG, caml_program)
+        Addrfunc(START_PRG_ARG, caml_program)
 #endif
 
 /* Code shared between caml_start_program and caml_callback */
@@ -1424,7 +1546,7 @@ FUNCTION caml_callback2_asm
         Addrglobal(START_PRG_ARG, caml_apply2)
         mtlr    0
 #else
-        Addrglobal(START_PRG_ARG, caml_apply2)
+        Addrfunc(START_PRG_ARG, caml_apply2)
 #endif
         b       .L102
         CFI_ENDPROC
@@ -1458,7 +1580,7 @@ FUNCTION caml_callback3_asm
         Addrglobal(START_PRG_ARG, caml_apply3)
         mtlr    0
 #else
-        Addrglobal(START_PRG_ARG, caml_apply3)
+        Addrfunc(START_PRG_ARG, caml_apply3)
 #endif
         b       .L102
         CFI_ENDPROC
@@ -1488,7 +1610,7 @@ ENDFUNCTION caml_callback3_asm
  * point to its parent at Handler_parent(Stack_handler(f)).
  */
 
-FUNCTION caml_perform
+OCAML_FUNCTION caml_perform
         CFI_STARTPROC
   /* r3: effect to perform
      r4: freshly allocated continuation */
@@ -1586,9 +1708,9 @@ FUNCTION caml_perform
 #endif
         b       .Lcaml_c_call
         CFI_ENDPROC
-ENDFUNCTION caml_perform
+ENDOCAML_FUNCTION caml_perform
 
-FUNCTION caml_reperform
+OCAML_FUNCTION caml_reperform
         CFI_STARTPROC
   /* r3: effect to perform
      r4: continuation */
@@ -1604,9 +1726,9 @@ FUNCTION caml_reperform
         UPDATE_BASE_POINTER TMP
         b       .Ldo_perform
         CFI_ENDPROC
-ENDFUNCTION caml_reperform
+ENDOCAML_FUNCTION caml_reperform
 
-FUNCTION caml_resume
+OCAML_FUNCTION caml_resume
         CFI_STARTPROC
   /* r3: Val_ptr(cont_tail)
      r4: fun
@@ -1663,11 +1785,11 @@ FUNCTION caml_resume
 #endif
         b       .Lcaml_c_call
         CFI_ENDPROC
-ENDFUNCTION caml_resume
+ENDOCAML_FUNCTION caml_resume
 
 /* Run a function on a new stack, then either
    return the value or invoke exception handler */
-FUNCTION caml_runstack
+OCAML_FUNCTION caml_runstack
         CFI_STARTPROC
         CFI_SIGNAL_FRAME
 #if defined(WITH_THREAD_SANITIZER) && !defined(MODEL_ppc)
@@ -1801,7 +1923,7 @@ FUNCTION caml_runstack
         lg      25, Handler_exception(8)
         b       1b
         CFI_ENDPROC
-ENDFUNCTION caml_runstack
+ENDOCAML_FUNCTION caml_runstack
 
 FUNCTION caml_ml_array_bound_error
         CFI_STARTPROC

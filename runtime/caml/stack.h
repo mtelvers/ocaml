@@ -73,8 +73,16 @@
 /* RESERVED_STACK(8) + TRAP_SIZE(8) + WORD (skip DWARF word, gc_regs is second) */
 #define Saved_gc_regs(sp) (*(value **)((sp) + 8 + 8 + 4))
 #define Stack_header_size (8 + 8 + 8)
+#elif defined(MODEL_ppc64)
+/* PPC64 ELF64v1: 23 int regs (8B each) + 14 float regs (8B = 1 word each) */
+#define Wosize_gc_regs (23 + 14)
+#define Saved_return_address_raw(sp) *((intnat *)((sp) + 16))
+#define First_frame(sp) (sp)
+/* RESERVED_STACK(48) + TRAP_SIZE(16) + 8 (skip DWARF word, gc_regs is second) */
+#define Saved_gc_regs(sp) (*(value **)((sp) + 48 + 16 + 8))
+#define Stack_header_size (48 + 16 + 16)
 #else
-/* PPC64 */
+/* PPC64 ELF64v2 */
 #ifdef WITH_FRAME_POINTERS
 #define Wosize_gc_regs \
   (22 /* int regs, r23 is ALLOC_PTR */ + 14 /* caller-save float regs */)
