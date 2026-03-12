@@ -715,6 +715,7 @@ module BR = Branch_relaxation.Make (struct
     | Lop(Icall_imm _) ->
         if abi = ELF32 then
           (if use_got () then 9 else 1)
+        else if abi = ELF64v1 then tocload_size + 3 + if_large 1
         else 3 + if_large 1
     | Lop(Itailcall_ind) ->
         (if abi = ELF32 then 5 else 6)
@@ -1045,7 +1046,18 @@ let emit_instr env i =
         | ELF32 ->
             emit_call func;
             record_frame env i.live (Dbg_other i.dbg)
-        | ELF64v1 | ELF64v2 ->
+        | ELF64v1 ->
+            (* On ELFv1, we must bypass PLT because OCaml functions lack
+               .opd descriptors and the ELFv1 dynamic linker would try to
+               dereference code bytes as function descriptors.  Use indirect
+               calls via r12, which also sets r12 for the callee's r2-from-r12
+               preamble. *)
+            emit_tocload emit_gpr 12 (TocSym func);
+            `	mtctr	12\n`;
+            `	bctrl\n`;
+            record_frame env i.live (Dbg_other i.dbg);
+            emit_reload_toc env
+        | ELF64v2 ->
             (* For PPC64, we cannot just emit a "bl s; nop" sequence, because
                of the following scenario:
                   - current function f1 calls f2 that has the same TOC
@@ -1093,7 +1105,12 @@ let emit_instr env i =
             emit_symbol_load_got emit_gpr 11 func;
             `	mtctr	11\n`
           | ELF32 -> ()
-          | ELF64v1 | ELF64v2 ->
+          | ELF64v1 ->
+            (* ELFv1: OCaml functions have no .opd descriptor, so TOC
+               holds code address directly. Same as ELFv2. *)
+            emit_tocload emit_gpr 12 (TocSym func);
+            `	mtctr	12\n`
+          | ELF64v2 ->
             emit_tocload emit_gpr 12 (TocSym func); (* addr of fn must be in r12 *)
             `	mtctr	12\n`
           end;
@@ -1154,7 +1171,12 @@ let emit_instr env i =
             (* On PPC32, c_stack points to a struct c_stack_link.
                We must place SP below it, matching SWITCH_OCAML_TO_C
                in runtime/power.S (-56 = linkage + param save + buffer). *)
-            `	addi	1, 1, -56\n`;
+            `	addi	1, 1, -56\n`
+          else if abi = ELF64v1 then
+            (* On PPC64 ELFv1, the mandatory parameter save area at SP+48
+               overlaps with c_stack_link fields. Offset SP below c_stack_link
+               by 112 bytes, matching SWITCH_OCAML_TO_C in runtime/power.S. *)
+            `	addi	1, 1, -112\n`;
           if fp then begin
             `	stdu	12, {emit_int (-reserved_stack_space)}(1)\n`;
             (* Follow the back chain back to the OCaml stack. *)
@@ -1584,11 +1606,23 @@ let fundecl fundecl =
   `{emit_symbol fundecl.fun_name}:\n`;
   cfi_startproc();
   begin match abi with
-  | ELF32 -> ()
-  | ELF64v1 | ELF64v2 ->
+  | ELF64v1 ->
+    (* ELFv1: OCaml functions have no .opd descriptors, but the ELFv1
+       dynamic linker dereferences STT_FUNC symbols as .opd when resolving
+       PLT entries (R_PPC64_JMP_SLOT), reading code bytes as data.
+       To avoid this, we bypass PLT entirely: all Icall_imm are emitted
+       as indirect calls via r12 (TOC load + mtctr + bctrl), and each
+       function computes r2 from r12 at entry, like ELFv2's global entry.
+       r12 is set by: indirect calls (ld 12,func@toc; mtctr 12; bctrl),
+       closure dispatch (ld 12,0(closure); mtctr 12; bctrl),
+       caml_start_program/callback, and tail calls (ld 12,func@toc). *)
+    `0:	addis	2, 12, (.TOC. - 0b)@ha\n`;
+    `	addi	2, 2, (.TOC. - 0b)@l\n`
+  | ELF64v2 ->
     `0:	addis	2, 12, (.TOC. - 0b)@ha\n`;
     `	addi	2, 2, (.TOC. - 0b)@l\n`;
     `	.localentry {emit_symbol fundecl.fun_name}, . - 0b\n`
+  | ELF32 -> ()
   end;
   emit_debug_info fundecl.fun_dbg;
   (* Dynamic stack checking *)
@@ -1619,7 +1653,16 @@ let fundecl fundecl =
       `	bctr\n`
     | ELF32 ->
       `	b	{emit_symbol "caml_call_gc"}\n`
-    | ELF64v1 | ELF64v2 ->
+    | ELF64v1 ->
+      `	std	2, 24(1)\n`;
+               (* save our TOC, will be restored by caml_call_gc *)
+      emit_tocload emit_gpr 12 (TocSym "caml_call_gc");
+      (* ELFv1: dereference function descriptor *)
+      `	ld	0, 0(12)\n`;
+      `	ld	2, 8(12)\n`;
+      `	mtctr	0\n`;
+      `	bctr\n`
+    | ELF64v2 ->
       `	std	2, 24(1)\n`;
                (* save our TOC, will be restored by caml_call_gc *)
       emit_tocload emit_gpr 12 (TocSym "caml_call_gc");
