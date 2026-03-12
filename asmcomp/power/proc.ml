@@ -318,19 +318,22 @@ let regs_are_volatile _rs = false
 let destroyed_at_c_call =
   (* On ELF32, non-allocating C calls always go through caml_c_call_stack_args
      (stack_ofs >= 16 due to parameter save area).  The emitter clobbers:
-     - r25 (phys 19): C function address loaded via emit_symbol_load_got
-     - r24 (phys 18): stack arg size loaded via li
-     - r27 (phys 21): return address saved via mflr in caml_c_call_stack_args
-     - r28 (phys 22): OCaml SP saved via mr in caml_c_call_stack_args
+     - r24: stack arg size loaded via li
+     - r25: C function address loaded via emit_symbol_load_got
+     - r27: return address saved via mflr in caml_c_call_stack_args
+     - r28: OCaml SP saved via mr in caml_c_call_stack_args
      On ELF64, stack_ofs can be 0 and uses the inline path (which does not
      clobber r27), but stack_ofs > 0 still goes through caml_c_call_stack_args.
-     Being conservative: mark all four for all ABIs. *)
+     On ELF64 (both v1 and v2), caml_c_call saves the TOC in r26 via
+     "mr C_CALL_TOC, 2", clobbering any value the allocator placed there.
+     Being conservative: mark all five for all ABIs. *)
   Array.of_list(List.map phys_reg
     (* Phys reg numbering (post ALLOC_PTR-to-r23 move):
-         17=r24, 18=r25, 20=r27, 21=r28 (C_CALL_TMP).
+         17=r24, 18=r25, 19=r26 (C_CALL_TOC), 20=r27, 21=r28 (C_CALL_TMP).
        r24, r25, r27 are only clobbered on ELF32 by caml_c_call_stack_args,
-       but marking them everywhere is a safe over-approximation. *)
-    [0; 1; 2; 3; 4; 5; 6; 7; 17; 18; 20; 21;
+       but marking them everywhere is a safe over-approximation.
+       r26 is clobbered on ELF64 (both v1 and v2) by "mr C_CALL_TOC, 2". *)
+    [0; 1; 2; 3; 4; 5; 6; 7; 17; 18; 19; 20; 21;
      100; 101; 102; 103; 104; 105; 106; 107; 108; 109; 110; 111; 112; 113])
 
 let destroyed_at_oper = function
