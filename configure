@@ -19675,7 +19675,7 @@ case $target in #(
   powerpc64*-*-linux-musl*) :
     has_native_backend=yes; arch=power; model=ppc64; system=linux ;; #(
   powerpc64*-*-linux*) :
-    arch=power; model=ppc64; system=linux ;; #(
+    has_native_backend=yes; arch=power; model=ppc64; system=linux ;; #(
   powerpc64le*-*-freebsd*) :
     has_native_backend=yes; arch=power; model=ppc64le; system=freebsd ;; #(
   powerpc64*-*-freebsd*) :
