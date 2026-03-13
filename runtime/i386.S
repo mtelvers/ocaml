@@ -818,20 +818,21 @@ ENDFUNCTION(caml_callback3_asm)
 /* caml_perform: perform an effect
    Arguments:
      eax: effect to perform
-     ebx: freshly allocated continuation */
+     ebx: freshly allocated continuation (1-word Cont_tag block)
+   Following amd64 semantics: cont[0] = cont_tail (Val_ptr of last fiber).
+   Handler_parent(Stack_handler(cont_tail)) = cont_head (first fiber). */
 FUNCTION(caml_perform)
         CFI_STARTPROC
         LOAD_DOMAIN_STATE(%edi)
-        movl    Caml_state(current_stack)(%edi), %ecx  /* ecx = old stack */
-        leal    1(%ecx), %edx                          /* edx = Val_ptr(old stack) */
-        movl    %edx, 0(%ebx)                          /* cont->fiber = Val_ptr(old stack) */
-        movl    %edx, 4(%ebx)                          /* cont->last_fiber = Val_ptr(old stack) */
+        movl    Caml_state(current_stack)(%edi), %ecx  /* ecx = current_stack */
+        leal    1(%ecx), %edx                          /* edx = Val_ptr(current_stack) */
+        movl    %edx, 0(%ebx)                          /* cont[0] = Val_ptr(current_stack) */
+        movl    %ecx, %edx                             /* edx = cont_head */
 LBL(do_perform):
     /*  eax: effect to perform
         ebx: continuation
-        ecx: old_stack
-        edx: last_fiber (tagged) */
-        movl    %edx, 4(%ebx)                          /* Update cont->last_fiber */
+        ecx: old_stack (the stack being captured)
+        edx: cont_head (first fiber in continuation chain) */
         movl    Stack_handler(%ecx), %esi              /* esi = handler */
         movl    Handler_parent(%esi), %edi             /* edi = parent stack */
         testl   %edi, %edi
@@ -845,86 +846,73 @@ LBL(do_perform):
        Save Stack_sp = esp+8, so First_frame(Stack_sp) = esp+16
        which is the caller's frame above the return address. */
         LOAD_DOMAIN_STATE(%ebp)
-        leal    8(%esp), %edx                          /* Stack_sp = esp + 8 */
-        movl    %edx, Stack_sp(%ecx)
-        movl    Caml_state(exn_handler)(%ebp), %edx
-        movl    %edx, Stack_exception(%ecx)
-    /* Now push the values we need to pass across the switch.
-       These are BELOW the Stack_sp save point, so they don't affect
-       the layout that fiber_return_common expects.
-       Stack: [handler][effect][cont][esi][edi][ebp][return_addr] */
+        leal    8(%esp), %esi
+        movl    %esi, Stack_sp(%ecx)
+        movl    Caml_state(exn_handler)(%ebp), %esi
+        movl    %esi, Stack_exception(%ecx)
+    /* Push values we need after the switch (below Stack_sp).
+       Compute new_cont_tail_val = Val_ptr(old_stack) = ecx + 1.
+       Stack: [cont][effect][new_tail][cont_head][handler][esi][edi][ebp][retaddr] */
+        movl    Stack_handler(%ecx), %esi              /* esi = handler (reload) */
+        leal    1(%ecx), %ecx                          /* ecx = Val_ptr(old_stack) */
         pushl   %esi; CFI_ADJUST(4)                    /* save handler */
+        pushl   %edx; CFI_ADJUST(4)                    /* save cont_head */
+        pushl   %ecx; CFI_ADJUST(4)                    /* save new cont_tail val */
         pushl   %eax; CFI_ADJUST(4)                    /* save effect */
         pushl   %ebx; CFI_ADJUST(4)                    /* save continuation */
     /* Save pointer to values for loading after switch */
         movl    %esp, %edx                             /* edx = pointer to saved values */
-    /* Switch to parent stack */
+    /* Switch to parent stack (edi still holds parent from before pushes) */
         movl    %edi, Caml_state(current_stack)(%ebp)
         movl    Stack_sp(%edi), %eax                   /* eax = parent Stack_sp */
         movl    Stack_exception(%edi), %esi
         movl    %esi, Caml_state(exn_handler)(%ebp)
-    /* Load callee-saves that runstack pushed. Use movl instead of pop so that
-       the values remain in memory for fiber_return_common to reload later.
+    /* Load callee-saves that runstack/resume pushed on parent.
        Stack_sp points to ebp; layout: [-8]=esi, [-4]=edi, [0]=ebp, [+4]=retaddr */
         movl    -8(%eax), %esi
         movl    -4(%eax), %edi
         movl    0(%eax), %ebp
-    /* Set esp to return address position (past callee-saves).
-       DON'T update Stack_sp - fiber_return_common will reload callee-saves. */
-        leal    4(%eax), %esp; CFI_ADJUST(-24)         /* esp = &retaddr */
-    /* Load saved values from fiber stack (edx still points to them) */
-        movl    8(%edx), %esi                          /* handler (was pushed first, so at +8) */
+    /* Set esp to return address position (past callee-saves) */
+        leal    4(%eax), %esp; CFI_ADJUST(-32)
+    /* Load saved values from fiber stack (edx still points there) */
+        movl    0(%edx), %ebx                          /* continuation */
         movl    4(%edx), %eax                          /* effect */
-        movl    0(%edx), %ebx                          /* continuation (was pushed last, so at +0) */
-    /* Null the handler's parent (after switch, for backtraces) */
-        movl    $0, Handler_parent(%esi)
-    /* Get effect handler and call caml_apply3 */
+        movl    8(%edx), %edi                          /* new cont_tail val */
+        movl    12(%edx), %ecx                         /* cont_head */
+        movl    16(%edx), %esi                         /* handler */
+    /* Update cont[0] with new cont_tail (needed for reperform path) */
+        movl    %edi, 0(%ebx)                          /* cont[0] = new cont_tail val */
+    /* Set handler's parent to cont_head (so resume can find cont_head) */
+        movl    %ecx, Handler_parent(%esi)
+    /* Get effect handler closure and call caml_apply2.
+       caml_apply2: eax=arg1(effect), ebx=arg2(continuation), ecx=closure */
         movl    Handler_effect(%esi), %ecx             /* ecx = effect handler closure */
-        movl    4(%ebx), %edx                          /* edx = last_fiber */
-    /* Arguments for apply3: eax=effect, ebx=cont, ecx=handler, edx=last_fiber
-       But caml_apply3 expects: eax=arg1, ebx=arg2, ecx=arg3, closure in edx
-       So we need: eax=effect, ebx=cont, ecx=last_fiber, edx=handler */
-        movl    %ecx, %esi                             /* esi = handler */
-        movl    %edx, %ecx                             /* ecx = last_fiber */
-        movl    %esi, %edx                             /* edx = handler closure */
-        jmp     G(caml_apply3)
+        jmp     G(caml_apply2)
 
 LBL(perform_no_parent):
-    /* No parent stack - switch back to performer and raise Unhandled
-       At entry: eax=effect, ebx=continuation, ecx=old_stack, esi=handler */
-        movl    0(%ebx), %edi                          /* load performer from cont */
-        subl    $1, %edi                               /* edi = Ptr_val(performer) */
-        LOAD_DOMAIN_STATE(%ebx)
-        movl    Caml_state(current_stack)(%ebx), %ecx
-    /* Only switch if different */
-        cmpl    %ecx, %edi
+    /* No parent stack - switch back to cont_head and raise Unhandled.
+       At entry: eax=effect, ecx=old_stack, edx=cont_head */
+        cmpl    %ecx, %edx
         je      LBL(perform_raise_unhandled)
-    /* Switch to performer stack.
-       We're going to raise an exception, so we don't need the normal switch pattern.
-       Just save current state (for potential GC during exception), switch,
-       and clean up performer's saved perform state.
-       Effect stays in eax throughout. */
+    /* Save current stack and switch to cont_head */
         pushl   %ebp; CFI_ADJUST(4)
         pushl   %edi; CFI_ADJUST(4)
         pushl   %esi; CFI_ADJUST(4)
-    /* Save Stack_sp with +8 offset for GC scanning (see runstack comment) */
+        LOAD_DOMAIN_STATE(%ebp)
         leal    8(%esp), %esi
         movl    %esi, Stack_sp(%ecx)
-        movl    Caml_state(exn_handler)(%ebx), %esi
+        movl    Caml_state(exn_handler)(%ebp), %esi
         movl    %esi, Stack_exception(%ecx)
-    /* Now switch to performer - keep effect in eax */
-        movl    %edi, Caml_state(current_stack)(%ebx)
-    /* Restore esp from performer's Stack_sp (saved with +8, so subtract 8) */
-        movl    Stack_sp(%edi), %esi
+    /* Switch to cont_head (edx) */
+        movl    %edx, Caml_state(current_stack)(%ebp)
+        movl    Stack_sp(%edx), %esi
         leal    -8(%esi), %esp
-        movl    Stack_exception(%edi), %esi
-        movl    %esi, Caml_state(exn_handler)(%ebx)
-    /* Performer's Stack_sp points to [ebp], layout: [cont][eff][hnd][esi][edi][ebp][ret]
-       esp = Stack_sp - 8 = &esi. Skip callee-saves to get to return_addr. */
-        addl    $12, %esp; CFI_ADJUST(-12)             /* skip callee-saves */
-    /* Now esp points to original return address, stack is clean */
+        movl    Stack_exception(%edx), %esi
+        movl    %esi, Caml_state(exn_handler)(%ebp)
+    /* Skip callee-saves to get to return_addr */
+        addl    $12, %esp; CFI_ADJUST(-12)
 LBL(perform_raise_unhandled):
-    /* Call caml_raise_unhandled_effect via caml_c_call
+    /* Call caml_raise_unhandled_effect via caml_c_call.
        Effect is in eax. */
         pushl   %eax                                   /* push effect as C argument */
         pushl   $0                                     /* dummy return address */
@@ -938,70 +926,70 @@ LBL(perform_raise_unhandled):
    Arguments:
      eax: effect to perform
      ebx: continuation
-     ecx: last_fiber (tagged) */
+   Following amd64 semantics: read cont[0] to get current cont_tail,
+   derive cont_head, link current stack into chain. */
 FUNCTION(caml_reperform)
         CFI_STARTPROC
-    /* Get handler from last_fiber (continuation's last_fiber) */
-        movl    Stack_handler_from_cont(%ecx), %esi    /* esi = handler (accounting for tag) */
-    /* Get current stack and append it to the fiber chain */
+    /* Read cont_tail from cont[0] (tagged pointer) */
+        movl    0(%ebx), %ecx                          /* ecx = cont[0] = Val_ptr(cont_tail) */
+    /* Get handler of cont_tail (use -1 offset to account for tag bit) */
+        movl    Stack_handler_from_cont(%ecx), %esi    /* esi = handler of cont_tail */
+    /* Read cont_head from handler's parent (set by previous do_perform) */
+        movl    Handler_parent(%esi), %edx             /* edx = cont_head */
+    /* Link current stack as parent of cont_tail's handler */
         LOAD_DOMAIN_STATE(%edi)
-        movl    Caml_state(current_stack)(%edi), %edi  /* edi = current stack */
-        movl    %edi, Handler_parent(%esi)             /* handler->parent = current */
+        movl    Caml_state(current_stack)(%edi), %ecx  /* ecx = current_stack */
+        movl    %ecx, Handler_parent(%esi)             /* cont_tail.handler->parent = current */
     /* Set up registers for do_perform:
-       ecx = old_stack (current stack, which will have its Stack_sp saved)
-       edx = Val_ptr(current stack) = new last_fiber */
-        movl    %edi, %ecx                             /* ecx = old_stack */
-        leal    1(%edi), %edx                          /* edx = Val_ptr(current) = last_fiber */
-    /* Jump to do_perform to do the full perform sequence.
-       This saves Stack_sp for the current fiber, which is needed when
-       the inner fiber returns via fiber_return_common. */
+       ecx = old_stack (current stack)
+       edx = cont_head (unchanged) */
         jmp     LBL(do_perform)
         CFI_ENDPROC
         ENDFUNCTION(caml_reperform)
 
 /* caml_resume: resume a continuation
-   Arguments:
-     eax: stack (tagged)
+   Arguments (3 args, matching amd64 semantics):
+     eax: Val_ptr(cont_tail) - tagged pointer to last fiber in continuation
      ebx: function closure
      ecx: argument
-     edx: last_fiber (tagged) */
+   Derives cont_head from Handler_parent(Stack_handler(cont_tail)). */
 FUNCTION(caml_resume)
         CFI_STARTPROC
     /* Save callee-saves like runstack does, so return path can pop them */
         pushl   %ebp; CFI_ADJUST(4)
         pushl   %edi; CFI_ADJUST(4)
         pushl   %esi; CFI_ADJUST(4)
-    /* Untag stack pointer */
-        subl    $1, %eax                               /* eax = Ptr_val(stack) = new_stack */
+    /* Untag cont_tail pointer */
+        subl    $1, %eax                               /* eax = cont_tail (untagged) */
     /* Check if stack is null (already resumed) */
         testl   %eax, %eax
         jz      LBL(resume_already_resumed)
-    /* Get handler from last_fiber (not the resumed stack).
-       This maintains the fiber chain: when a resumed computation completes,
-       it returns through each fiber in the chain via Handler_parent links.
-       Using Stack_handler_from_cont (=7) accounts for the tag bit in edx. */
-        movl    Stack_handler_from_cont(%edx), %edi    /* edi = handler of last_fiber */
-    /* Link current stack as parent of last_fiber's handler */
+    /* Derive cont_head from cont_tail.
+       cont_head = Handler_parent(Stack_handler(cont_tail))
+       This was set by do_perform when the continuation was captured. */
+        movl    Stack_handler(%eax), %edx              /* edx = Stack_handler(cont_tail) */
+        movl    Handler_parent(%edx), %edi             /* edi = cont_head */
+    /* Link current stack as parent of cont_tail's handler.
+       This overwrites the cont_head link, but we already saved it in edi. */
         LOAD_DOMAIN_STATE(%esi)
         movl    Caml_state(current_stack)(%esi), %ebp  /* ebp = current stack */
-        movl    %ebp, Handler_parent(%edi)             /* last_fiber.handler->parent = current */
+        movl    %ebp, Handler_parent(%edx)             /* cont_tail.handler->parent = current */
     /* Save old stack state. Stack: [esi][edi][ebp][return_addr]...
        Save Stack_sp = esp+8 for GC scanning (see runstack comment). */
-        leal    8(%esp), %edi                          /* edi = esp + 8 */
-        movl    %edi, Stack_sp(%ebp)
-        movl    Caml_state(exn_handler)(%esi), %edi
-        movl    %edi, Stack_exception(%ebp)
-    /* Switch to resumed stack. Stack_sp was saved with +8 offset. */
-        movl    %eax, Caml_state(current_stack)(%esi)
-        movl    Stack_sp(%eax), %edi                   /* edi = fiber's Stack_sp */
-        leal    -8(%edi), %esp                         /* esp = Stack_sp - 8 */
-        movl    Stack_exception(%eax), %edi
-        movl    %edi, Caml_state(exn_handler)(%esi)
-    /* Pop callee-saves that perform pushed on fiber stack.
-       Stack layout: [cont][effect][handler][esi][edi][ebp][return_addr]
+        leal    8(%esp), %edx                          /* edx = esp + 8 */
+        movl    %edx, Stack_sp(%ebp)
+        movl    Caml_state(exn_handler)(%esi), %edx
+        movl    %edx, Stack_exception(%ebp)
+    /* Switch to cont_head (edi). */
+        movl    %edi, Caml_state(current_stack)(%esi)
+        movl    Stack_sp(%edi), %edx                   /* edx = cont_head's Stack_sp */
+        leal    -8(%edx), %esp                         /* esp = Stack_sp - 8 */
+        movl    Stack_exception(%edi), %edx
+        movl    %edx, Caml_state(exn_handler)(%esi)
+    /* Pop callee-saves that perform pushed on cont_head's stack.
+       Stack layout: [...][esi][edi][ebp][return_addr]
        Stack_sp points to [ebp], so esp = Stack_sp - 8 = &esi.
-       After popping callee-saves, esp points to return_addr.
-       (The saved values cont/effect/handler are below Stack_sp, already skipped.) */
+       After popping callee-saves, esp points to return_addr. */
         popl    %esi; CFI_ADJUST(-4)
         popl    %edi; CFI_ADJUST(-4)
         popl    %ebp; CFI_ADJUST(-4)
