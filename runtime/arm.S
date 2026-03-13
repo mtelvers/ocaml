@@ -673,40 +673,41 @@ FUNCTION(caml_callback3_asm)
 FUNCTION(caml_perform)
         CFI_STARTPROC
     /*  r0: effect to perform
-        r1: freshly allocated continuation */
-        ldr     r2, Caml_state(current_stack) /* r2 := old stack */
-        add     r3, r2, #1 /* r3 := Val_ptr(old stack) */
-        str     r3, [r1] /* Initialize continuation field 0 */
-        str     r3, [r1, #4] /* Initialize continuation field 1 (last_fiber) */
+        r1: freshly allocated continuation (1-word Cont_tag block)
+        Following amd64 semantics: cont[0] = cont_tail (Val_ptr of last fiber).
+        Handler_parent(Stack_handler(cont_tail)) = cont_head (first fiber). */
+        ldr     r2, Caml_state(current_stack) /* r2 := current_stack */
+        add     r3, r2, #1 /* r3 := Val_ptr(current_stack) */
+        str     r3, [r1] /* cont[0] = Val_ptr(current_stack) */
+        mov     r3, r2   /* r3 := cont_head */
 .Ldo_perform:
     /*  r0: effect to perform
         r1: continuation
-        r2: old_stack
-        r3: last_fiber */
-
-        str     r3, [r1, #4] /* Set the last fiber field in the continuation */
+        r2: old_stack (the stack being captured)
+        r3: cont_head (first fiber in continuation chain) */
         ldr     r5, Stack_handler(r2)  /* r5 := old stack -> handler */
         ldr     r6, Handler_parent(r5) /* r6 := parent stack */
         cbz     r6, 1f
         mov     r7, r5                 /* Save handler in r7 (not clobbered by SWITCH) */
         SWITCH_OCAML_STACKS r2, r6
-    /*  we have to null the Handler_parent after the switch because
-        the Handler_parent is needed to unwind the stack for backtraces */
-        mov     r4, #0
-        str     r4, Handler_parent(r7) /* Set parent of performer to NULL */
-        ldr     r12, Handler_effect(r7)
-        mov     r2, r3                 /* r2 := last_fiber */
-        mov     r3, r12                /* r3 := effect handler */
-        ldr     r12, =caml_apply3
+    /* Update cont[0] with new cont_tail = Val_ptr(old_stack).
+       r2 is preserved across SWITCH (old_stack). */
+        add     r4, r2, #1             /* r4 := Val_ptr(old_stack) = new cont_tail */
+        str     r4, [r1]               /* cont[0] = new cont_tail */
+    /* Set handler's parent to cont_head (so resume can find cont_head) */
+        str     r3, Handler_parent(r7)
+    /* Get effect handler closure and call caml_apply2.
+       caml_apply2 on ARM: r0=arg1(effect), r1=arg2(continuation), r2=closure */
+        ldr     r2, Handler_effect(r7)
+        ldr     r12, =caml_apply2
         bx      r12
 1:
-    /*  switch back to original performer before raising Unhandled
+    /*  No parent stack. Switch back to cont_head and raise Unhandled.
         (no-op unless this is a reperform) */
-        ldr     r6, [r1] /* load performer stack from continuation */
-        sub     r6, r6, #1 /* r6 := Ptr_val(r6) */
-        ldr     r5, Caml_state(current_stack)
-        SWITCH_OCAML_STACKS r5, r6
-    /*  No parent stack. Raise Unhandled. */
+        cmp     r2, r3
+        beq     .Lperform_raise_unhandled
+        SWITCH_OCAML_STACKS r2, r3
+.Lperform_raise_unhandled:
     /* r0 already contains the effect to raise */
         ldr     r7, =caml_raise_unhandled_effect
         b       caml_c_call
@@ -717,34 +718,36 @@ FUNCTION(caml_reperform)
         CFI_STARTPROC
     /*  r0: effect to perform
         r1: continuation
-        r2: last_fiber */
-        ldr     r5, Stack_handler_from_cont(r2)
-        ldr     r2, Caml_state(current_stack) /* r2 := old stack */
-        str     r2, Handler_parent(r5) /* Append to last_fiber */
-        add     r3, r2, #1 /* r3 (last_fiber) := Val_ptr(old stack) */
+        Following amd64 semantics: read cont[0] to get current cont_tail,
+        derive cont_head, link current stack into chain. */
+        ldr     r4, [r1]                              /* r4 = cont[0] = Val_ptr(cont_tail) */
+        ldr     r5, Stack_handler_from_cont(r4)       /* r5 = handler of cont_tail */
+        ldr     r3, Handler_parent(r5)                 /* r3 = cont_head */
+        ldr     r2, Caml_state(current_stack)          /* r2 = current_stack */
+        str     r2, Handler_parent(r5)                 /* link current into chain */
+    /* r0=effect, r1=cont, r2=old_stack, r3=cont_head */
         b       .Ldo_perform
         CFI_ENDPROC
         .size   caml_reperform, .-caml_reperform
 
 FUNCTION(caml_resume)
         CFI_STARTPROC
-    /*  r0: new stack
-        r1: fun
-        r2: arg */
-        sub     r0, r0, #1 /* r0 = Ptr_val(r0) */
-        ldr     r3, [r1]  /* code pointer */
+    /*  r0: Val_ptr(cont_tail) - tagged pointer to last fiber
+        r1: fun (closure)
+        r2: arg
+        Derives cont_head from Handler_parent(Stack_handler(cont_tail)). */
+        sub     r0, r0, #1 /* r0 = cont_tail (untagged) */
+        ldr     r3, [r1]  /* r3 = code pointer */
     /* Check if stack null, then already used */
         cbz     r0, 2f
-    /* Find end of list of stacks (put in r4) */
-        mov     r5, r0
-1:      ldr     r4, Stack_handler(r5)
-        ldr     r5, Handler_parent(r4)
-        cmp     r5, #0
-        bne     1b
-    /* Add current stack to the end */
+    /* Derive cont_head from cont_tail */
+        ldr     r4, Stack_handler(r0)          /* r4 = handler of cont_tail */
+        ldr     r6, Handler_parent(r4)         /* r6 = cont_head */
+    /* Link current stack as parent of cont_tail's handler */
         ldr     r5, Caml_state(current_stack)
         str     r5, Handler_parent(r4)
-        SWITCH_OCAML_STACKS r5, r0
+    /* Switch to cont_head (r6) */
+        SWITCH_OCAML_STACKS r5, r6
         mov     r0, r2
         bx      r3
 2:      ldr     r7, =caml_raise_continuation_already_resumed
