@@ -429,10 +429,14 @@ FUNCTION(caml_start_program)
     /* Save callee-save floating-point registers (not needed for soft float) */
         vpush   {d8-d15}; CFI_ADJUST(64)
 #endif
-    /* Save return address and callee-save registers */
-        push    {r4-r8,r10,r11,lr}; CFI_ADJUST(32)      /* 8-byte alignment */
+    /* Save return address and callee-save registers.
+       r9 (platform/GOT register) must be saved because caml_c_call_stack_args
+       uses it as a scratch register for stack arg passing, which would corrupt
+       the C caller's GOT base in PIC/PIE code. */
+        push    {r4-r11,lr}; CFI_ADJUST(36)
+        sub     sp, sp, #4; CFI_ADJUST(4)               /* 8-byte alignment */
 #if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
-        CFI_OFFSET(lr, -68)
+        CFI_OFFSET(lr, -72)
 #else
         CFI_OFFSET(lr, -4)
 #endif
@@ -496,7 +500,8 @@ FUNCTION(caml_start_program)
         add     sp, sp, #16; CFI_ADJUST(-16)
         str     r4, Caml_state(c_stack)
     /* Reload callee-save registers and return address */
-        pop     {r4-r8,r10,r11,lr}; CFI_ADJUST(-32)
+        add     sp, sp, #4; CFI_ADJUST(-4)               /* undo alignment pad */
+        pop     {r4-r11,lr}; CFI_ADJUST(-36)
 #if (defined(SYS_linux_eabihf) || defined(SYS_netbsd)) && !defined(MODEL_armv8m)
     /* Reload callee-save floating-point registers (not needed for soft float) */
         vpop    {d8-d15}; CFI_ADJUST(-64)
