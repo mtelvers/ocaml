@@ -16,6 +16,6 @@
    gdb;
    script = "sh ${test_source_directory}/sanitize.sh gdb";
    script;
-   reference = "${test_source_directory}/gdb.${system}.${arch}.reference";
+   reference = "${test_source_directory}/gdb.${system}.${arch}.${model}.reference";
    check-program-output;
  *)
