@@ -184,6 +184,16 @@
 #define DW_REG_sp 1
 #define DW_REG_lr 65
 
+/* On ELFv1 (MODEL_ppc64), CFI_SIGNAL_FRAME causes BFD ld's .eh_frame optimizer
+   to corrupt FDEs by dropping DW_CFA_def_cfa_expression instructions.
+   The associated DW_CFA_val_expression for SP also triggers a recursive
+   frame computation in GDB's ELFv1 unwinder.  Omit both on ELFv1. */
+#if defined(MODEL_ppc64)
+#define CFI_SIGNAL_FRAME_IF_SUPPORTED /* nothing */
+#else
+#define CFI_SIGNAL_FRAME_IF_SUPPORTED CFI_SIGNAL_FRAME
+#endif
+
 /* Function definitions */
 
 .macro TEXT_SECTION name
@@ -222,11 +232,10 @@ caml_hot__code_end:
         .section ".opd","aw"
         .align 3
         .globl \name
-        TYPE_DIRECTIVE(\name,@function)
 \name:
         .quad .L.\name,.TOC.@tocbase,0
-        .size \name,24
         .previous
+        TYPE_DIRECTIVE(\name,@function)
         TEXT_SECTION \name
 .L.\name:
 .endm
@@ -244,7 +253,7 @@ caml_hot__code_end:
 
 #if defined(MODEL_ppc64)
 .macro ENDFUNCTION name
-        .size .L.\name, .-.L.\name
+        .size \name, .-.L.\name
 .endm
 #else
 .macro ENDFUNCTION name
@@ -301,6 +310,7 @@ caml_hot__code_end:
    /* Save return address in caller's frame. */
         mflr    0
         stw     0, LR_SAVE_OFFSET(SP)
+        CFI_OFFSET(65, LR_SAVE_OFFSET) /* LR (DWARF reg 65) saved at CFA + 4 */
 .endm
 
 .macro LEAVE_FUNCTION
@@ -342,18 +352,17 @@ caml_hot__code_end:
 
 /* INIT_LR_SAVE: store \target in this frame's LR save area, obtaining its
    address with a bl to the next instruction. */
-#ifdef WITH_FRAME_POINTERS
 .macro INIT_LR_SAVE target, here
         bl      \here
 \here:
         mflr    TMP
         addi    TMP, TMP, (\target - \here + 4)
-        std     TMP, LR_SAVE(SP)
-.endm
+#if defined(MODEL_ppc)
+        stw     TMP, LR_SAVE_OFFSET(SP)
 #else
-.macro INIT_LR_SAVE target, here
-.endm
+        std     TMP, LR_SAVE(SP)
 #endif
+.endm
 
 /* Accessing global variables.  */
 
@@ -450,17 +459,36 @@ caml_hot__code_end:
        addi    SP, TMP2, -112
 #else
        mr      SP, TMP2
+#endif
 #ifdef ASM_CFI_SUPPORTED
        CFI_REMEMBER_STATE
-   /* sp points to the c_stack_link.
-      CFA = *(SP + Cstack_sp_offset) = OCaml_SP (the SP at the call site)
-      LR was saved at OCaml_SP + 16 before the switch, so LR is at CFA + 16 */
+   /* CFA = *(SP + offset_to_Cstack_sp) = OCaml_SP (the SP at the call site).
+      On PPC32/PPC64BE, SP is offset below c_stack_link for the C ABI save area,
+      so add that offset to reach the Cstack_sp field.
+      LR was saved at OCaml_SP + LR_SAVE before the switch. */
+#if defined(MODEL_ppc)
+   /* SP = c_stack_link - 56, Cstack_sp_offset = 4, total = 60 (1-byte SLEB128) */
+       .cfi_escape DW_CFA_def_cfa_expression, 3,                      \
+          DW_OP_breg + DW_REG_sp, (Cstack_sp_offset + 56), DW_OP_deref
+       CFI_OFFSET(65, LR_SAVE_OFFSET) /* LR at CFA + 4 */
+#elif defined(MODEL_ppc64)
+   /* SP = c_stack_link - 112, Cstack_sp_offset = 56, total = 168 (2-byte SLEB128) */
+       .cfi_escape DW_CFA_def_cfa_expression, 4,                      \
+          DW_OP_breg + DW_REG_sp, 0xa8, 0x01, DW_OP_deref
+       CFI_OFFSET(65, LR_SAVE) /* LR at CFA + 16 */
+#else
        .cfi_escape DW_CFA_def_cfa_expression, 3,                      \
           DW_OP_breg + DW_REG_sp, Cstack_sp_offset, DW_OP_deref
-       CFI_OFFSET(DW_REG_lr, LR_SAVE)  /* LR saved at CFA + LR_SAVE */
+       CFI_OFFSET(65, LR_SAVE) /* LR at CFA + 16 */
+#endif
    /* Tell the debugger that the interrupted SP value equals CFA.
-      This is needed for proper unwinding through the signal frame. */
+      This is needed for proper unwinding through the signal frame.
+      On ELFv1, DW_CFA_val_expression for SP triggers a recursive frame
+      computation in GDB's unwinder (which uses the back chain to cross-check
+      SP), so we omit it along with CFI_SIGNAL_FRAME on that ABI. */
+#if !defined(MODEL_ppc64)
        .cfi_escape DW_CFA_val_expression, DW_REG_sp, 1, DW_OP_call_frame_cfa
+#endif
 #endif
 .endm
 
@@ -810,7 +838,7 @@ caml_system__code_begin:
 
 FUNCTION caml_call_realloc_stack
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
         ENTER_FUNCTION
    /* Save all registers, as well as ALLOC_PTR and TRAP_PTR */
         SAVE_ALL_REGS  /* r27 is preserved */
@@ -845,7 +873,7 @@ ENDFUNCTION caml_call_realloc_stack
 
 FUNCTION caml_call_gc
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
         ENTER_FUNCTION
    /* Save all registers, as well as ALLOC_PTR and TRAP_PTR */
         SAVE_ALL_REGS
@@ -882,7 +910,7 @@ ENDFUNCTION caml_call_gc
 
 FUNCTION caml_c_call
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
         TSAN_SAVE_CALLER_REGS
         TSAN_ENTER_FUNCTION
         TSAN_RESTORE_CALLER_REGS
@@ -976,7 +1004,7 @@ ENDFUNCTION caml_c_call
 
 FUNCTION caml_c_call_stack_args
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
    /* Extra arguments to be passed on stack:
       STACK_ARG_BYTES at offsets RESERVED_STACK
       to RESERVED_STACK + STACK_ARG_BYTES from SP.
@@ -1217,7 +1245,7 @@ ENDFUNCTION caml_raise_exception
 
 FUNCTION caml_start_program
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
 
 #if defined(WITH_THREAD_SANITIZER) && !defined(MODEL_ppc)
   /* We can't use the TSAN_ENTER_FUNCTION macro, as it assumes to run on an
@@ -1386,12 +1414,16 @@ FUNCTION caml_start_program
             DW_OP_breg + DW_REG_sp, 0,                                     \
             DW_OP_plus_uconst, (RESERVED_STACK + TRAP_SIZE),               \
             DW_OP_deref
+#if defined(MODEL_ppc)
+        CFI_OFFSET(DW_REG_lr, LR_SAVE_OFFSET) /* LR saved at CFA + 4 */
+#else
         CFI_OFFSET(DW_REG_lr, LR_SAVE) /* LR saved at CFA + LR_SAVE */
+#endif
 #endif
     /* Call the OCaml code (address in START_PRG_ARG) */
         mtctr   START_PRG_ARG
-    /* Pre-initialize the LR save area at SP+16 with the return address, so
-       the runtime's stack walk can find LR even if the first OCaml function
+    /* Pre-initialize the LR save area with the return address, so the
+       runtime's stack walk can find LR even if the first OCaml function
        does not save it (when fun_frame_required = false).  The address
        stored is .Lcaml_retaddr + 4, the instruction after bctrl. */
         INIT_LR_SAVE .Lcaml_retaddr, .Linit_lr_save
@@ -1791,7 +1823,7 @@ ENDOCAML_FUNCTION caml_resume
    return the value or invoke exception handler */
 OCAML_FUNCTION caml_runstack
         CFI_STARTPROC
-        CFI_SIGNAL_FRAME
+        CFI_SIGNAL_FRAME_IF_SUPPORTED
 #if defined(WITH_THREAD_SANITIZER) && !defined(MODEL_ppc)
         SWITCH_OCAML_TO_C
         TSAN_SETUP_C_CALL 32
@@ -1867,7 +1899,11 @@ OCAML_FUNCTION caml_runstack
                + Handler_parent_offset),                                      \
             DW_OP_deref,                                                      \
             DW_OP_plus_uconst, Stack_sp_offset, DW_OP_deref
+#if defined(MODEL_ppc)
+        CFI_OFFSET(DW_REG_lr, LR_SAVE_OFFSET)  /* LR saved at CFA + 4 */
+#else
         CFI_OFFSET(DW_REG_lr, LR_SAVE)  /* LR saved at CFA + LR_SAVE */
+#endif
 #endif
     /* Pre-initialize the LR save area at SP+16 with the return address, so
        the runtime's stack walk can find LR even if the first OCaml function
