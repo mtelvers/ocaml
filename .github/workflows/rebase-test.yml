@@ -28,9 +28,15 @@ jobs:
           git remote add upstream https://github.com/ocaml/ocaml.git || true
           git fetch upstream trunk
 
-      - name: Drop previous status commit before rebase
+      - name: Drop previous status and workflow-removal commits before rebase
         run: |
+          # Drop transient commits left by the previous run so they never
+          # become part of the rebase base (which would conflict with any
+          # upstream change to the same files).
           if [ "$(git log -1 --format=%s)" = "Backend test status" ]; then
+            git reset --hard HEAD~1
+          fi
+          if [ "$(git log -1 --format=%s)" = "CI: remove upstream workflows" ]; then
             git reset --hard HEAD~1
           fi
 
@@ -47,10 +53,14 @@ jobs:
       - name: Remove upstream workflows
         if: steps.rebase.outputs.rebase_failed != 'true'
         run: |
+          # Make a *separate* commit for the deletions. This commit (and
+          # the status commit on top of it) is dropped at the start of the
+          # next run, so the workflow files are never deleted in any commit
+          # that participates in the rebase.
           find .github/workflows -name '*.yml' ! -name 'rebase-test.yml' -delete
           git add .github/workflows
           if ! git diff --cached --quiet; then
-            git commit --amend --no-edit
+            git commit -m "CI: remove upstream workflows"
           fi
 
       - name: Check if already tested
