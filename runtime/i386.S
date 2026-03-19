@@ -327,13 +327,13 @@
 
         .text
 #if defined(FUNCTION_SECTIONS)
-        TEXT_SECTION(caml_hot.code_begin)
-        .globl  G(caml_hot.code_begin)
-G(caml_hot.code_begin):
+        TEXT_SECTION(caml_hot__code_begin)
+        .globl  G(caml_hot__code_begin)
+G(caml_hot__code_begin):
 
-        TEXT_SECTION(caml_hot.code_end)
-        .globl  G(caml_hot.code_end)
-G(caml_hot.code_end):
+        TEXT_SECTION(caml_hot__code_end)
+        .globl  G(caml_hot__code_end)
+G(caml_hot__code_end):
 #endif
 
 /*=========================================================================*/

@@ -111,13 +111,13 @@ domain_state_ptr  .req    r11
 name:
 
 #if defined(FUNCTION_SECTIONS)
-        TEXT_SECTION(caml_hot.code_begin)
-        .globl  caml_hot.code_begin
-caml_hot.code_begin:
+        TEXT_SECTION(caml_hot__code_begin)
+        .globl  caml_hot__code_begin
+caml_hot__code_begin:
 
-        TEXT_SECTION(caml_hot.code_end)
-        .globl  caml_hot.code_end
-caml_hot.code_end:
+        TEXT_SECTION(caml_hot__code_end)
+        .globl  caml_hot__code_end
+caml_hot__code_end:
 #endif
 
         .set    domain_curr_field, 0

@@ -19,6 +19,8 @@
 
 let arch = {@QS@|@arch@|@QS@}
 
+let model = {@QS@|@model@|@QS@}
+
 let afl_instrument = @afl@
 
 let asm = {@QS@|@AS@|@QS@}
