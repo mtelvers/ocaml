@@ -1127,6 +1127,7 @@ let config_variables _log env =
   Environments.add_bindings
   [
     Ocaml_variables.arch, Ocamltest_config.arch;
+    Ocaml_variables.model, Ocamltest_config.model;
     Ocaml_variables.ocamlrun, Ocaml_files.ocamlrun;
     Ocaml_variables.ocamlc_byte, Ocaml_files.ocamlc;
     Ocaml_variables.ocamlopt_byte, Ocaml_files.ocamlopt;
