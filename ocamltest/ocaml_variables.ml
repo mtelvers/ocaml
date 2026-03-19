@@ -32,6 +32,9 @@ let all_modules = make ("all_modules",
 let arch = make ("arch",
   "Host architecture")
 
+let model = make ("model",
+  "Host architecture model")
+
 let binary_modules = make ("binary_modules",
   "Additional binary modules to link")
 
