@@ -18,6 +18,9 @@
 val arch : string
 (** Architecture for the native compiler *)
 
+val model : string
+(** Model for the native compiler *)
+
 val afl_instrument : bool
 (** Whether AFL support has been enabled in the compiler *)
 
