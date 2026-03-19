@@ -764,21 +764,29 @@ let emit_instr env i =
         let r = i.res.(0) in
         begin match memory_chunk with
         | Word_int | Word_val when is_atomic ->
-            (* Atomic load: use acquire semantics with memory barrier *)
-            assert (addressing_mode = Iindexed 0);
+            (* Atomic load: use acquire semantics with memory barrier.
+               ARM lda/ldar only support [Rn] with no offset, so for
+               non-zero offsets (e.g. Atomic.Array), compute effective
+               address first using the result register as scratch. *)
+            let base_ninstr = match addressing_mode with
+              | Iindexed 0 -> 0
+              | Iindexed n ->
+                `	add	{emit_reg r}, {emit_reg i.arg.(0)}, #{emit_int n}\n`; 1
+            in
+            let base = if addressing_mode = Iindexed 0 then i.arg.(0) else r in
             if !arch = ARMv8M then begin
               (* ARMv8-M uses lda (not ldar) for load-acquire *)
-              `	lda	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`; 1
+              `	lda	{emit_reg r}, [{emit_reg base}]\n`; base_ninstr + 1
             end else if !arch >= ARMv8 then begin
               (* ARMv8-A has load-acquire instruction *)
-              `	ldar	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`; 1
+              `	ldar	{emit_reg r}, [{emit_reg base}]\n`; base_ninstr + 1
             end else if !arch >= ARMv7 then begin
               (* ARMv7 uses ldr + dmb for acquire semantics *)
-              `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
+              `	ldr	{emit_reg r}, {emit_addressing addressing_mode i.arg 0}\n`;
               `	dmb	ish\n`; 2
             end else begin
               (* ARMv6 and earlier use ldr + CP15 memory barrier *)
-              `	ldr	{emit_reg r}, [{emit_reg i.arg.(0)}]\n`;
+              `	ldr	{emit_reg r}, {emit_addressing addressing_mode i.arg 0}\n`;
               `	mcr	p15, 0, r12, c7, c10, 5\n`; 2
             end
         | _ ->
@@ -828,9 +836,15 @@ let emit_instr env i =
                     `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
                   end
                 end else if !arch >= ARMv8 then begin
-                  (* ARMv8-A has store-release instruction *)
-                  assert (addr = Iindexed 0);
-                  `	stlr	{emit_reg r}, [{emit_reg i.arg.(1)}]\n`; 1
+                  (* ARMv8-A has store-release instruction.
+                     stlr only supports [Rn] with no offset, so for
+                     non-zero offsets, fall back to dmb + str. *)
+                  if addr = Iindexed 0 then begin
+                    `	stlr	{emit_reg r}, [{emit_reg i.arg.(1)}]\n`; 1
+                  end else begin
+                    `	dmb	ish\n`;
+                    `	str	{emit_reg r}, {emit_addressing addr i.arg 1}\n`; 2
+                  end
                 end else if !arch >= ARMv7 then begin
                   (* ARMv7 uses dmb + str for release semantics *)
                   `	dmb	ish\n`;
