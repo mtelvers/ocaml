@@ -530,6 +530,18 @@ CAMLprim value caml_atomic_fetch_add (value ref, value incr)
   return caml_atomic_fetch_add_field(ref, Val_long(0), incr);
 }
 
+/* Helper for the 32-bit ARM backend: takes a raw pointer and a raw
+   increment (already in 2*n form) and returns the raw old value.
+   Used by arm/selection.ml to translate Catomic_fetch_add into a C
+   call, avoiding an inline LL/SC loop that would need more scratch
+   registers than the ARM 32-bit register allocator can spare. */
+CAMLprim intnat caml_atomic_fetch_add_raw (intnat *p, intnat raw_incr)
+{
+  intnat old = atomic_fetch_add((atomic_intnat *)p, raw_incr);
+  atomic_thread_fence(memory_order_release);
+  return old;
+}
+
 CAMLexport void caml_set_fields (value obj, value v)
 {
   CAMLassert (Is_block(obj));
