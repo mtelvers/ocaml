@@ -532,6 +532,8 @@ module BR = Branch_relaxation.Make (struct
     | Lop (Ispecific (Isqrtf)) -> 1
     | Lop (Ispecific (Inegmulf)) -> 1
     | Lop (Idls_get) -> 2
+    (* Iatomic_fetch_add is routed to a C call by arm/selection.ml *)
+    | Lop (Iatomic_fetch_add) -> assert false
     | Lop (Ireturn_addr) -> 1
     | Lreloadretaddr -> 2
     | Lreturn -> epilogue_size f
@@ -1065,6 +1067,9 @@ let emit_instr env i =
         (* Load domain-local state root pointer *)
         let offset = Domainstate.(idx_of_field Domain_dls_root) * 8 in
         `	ldr	{emit_reg i.res.(0)}, [domain_state_ptr, #{emit_int offset}]\n`; 1
+    | Lop (Iatomic_fetch_add) ->
+        (* Should never reach here: routed to a C call in arm/selection.ml *)
+        assert false
     | Lop(Ireturn_addr) ->
         let n = frame_size env in
         if env.f.fun_frame_required then begin
