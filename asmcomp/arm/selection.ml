@@ -217,6 +217,12 @@ method! select_operation op args dbg =
       [Cop(Clsl | Clsr | Casr as op, [arg1; Cconst_int (n, _)], _); arg2])
     when n > 0 && n < 32 ->
       (Ispecific(Ishiftcheckbound(select_shiftop op, n)), [arg1; arg2])
+  (* Route atomic fetch-and-add through a C runtime helper.  An inline
+     LL/SC loop needs more scratch registers than 32-bit ARM can spare
+     (r12 is in the allocatable set on account of "function too complex"
+     issues in the stdlib), so delegate to caml_atomic_fetch_add_raw. *)
+  | (Catomic_fetch_add, args) ->
+      (self#iextcall "caml_atomic_fetch_add_raw" typ_int [XInt; XInt], args)
   (* Turn integer division/modulus into runtime ABI calls *)
   | (Cdivi, args) ->
       (self#iextcall "__aeabi_idiv" typ_int [], args)
