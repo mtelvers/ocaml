@@ -826,6 +826,11 @@ let emit_instr env fallthrough i =
       (* Load domain state pointer into a temp register, then get DLS root *)
       load_domain_state edx;
       I.mov (domain_field Domain_dls_root RDX) (reg i.res.(0))
+  | Lop (Iatomic_fetch_add) ->
+      (* arg.(0) = pointer, arg.(1) = increment, res.(0) = old value.
+         lock xadd swaps the increment with *ptr atomically. *)
+      I.mov (reg i.arg.(1)) (reg i.res.(0));
+      I.lock_xadd (reg i.res.(0)) (mem32 DWORD 0 (reg32 i.arg.(0)))
   | Lop (Ireturn_addr) ->
       (* Get return address from stack. On i386, return address is at esp + frame_size - 4 *)
       let offset = frame_size env - 4 in

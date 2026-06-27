@@ -115,14 +115,16 @@ method! select_operation op args dbg =
      [arg1; arg2; arg3]) ->
       (Ispecific Imultaddf, [arg1; arg2; arg3])
   (* Only the unboxed rounding externals pass their argument in a
-     register, hence the argument type. *)
-  | (Cextcall("caml_round", _, [XFloat], false), _) ->
+     register, hence the argument type.  frin/friz/frip/frim are PowerPC
+     ISA 2.06 (POWER6+); PPC32 targets don't have them, so fall back to
+     the runtime helpers there. *)
+  | (Cextcall("caml_round", _, [XFloat], false), _) when Arch.ppc64 ->
       (Ispecific (Iroundf Rnearest_away), args)
-  | (Cextcall("caml_trunc", _, [XFloat], false), _) ->
+  | (Cextcall("caml_trunc", _, [XFloat], false), _) when Arch.ppc64 ->
       (Ispecific (Iroundf Rtoward_zero), args)
-  | (Cextcall("ceil", _, [XFloat], false), _) ->
+  | (Cextcall("ceil", _, [XFloat], false), _) when Arch.ppc64 ->
       (Ispecific (Iroundf Rtoward_pos), args)
-  | (Cextcall("floor", _, [XFloat], false), _) ->
+  | (Cextcall("floor", _, [XFloat], false), _) when Arch.ppc64 ->
       (Ispecific (Iroundf Rtoward_neg), args)
   | _ ->
       super#select_operation op args dbg
