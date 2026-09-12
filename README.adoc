@@ -1,3 +1,21 @@
+== 32-bit and Big-Endian Native Code Backends
+
+This branch adds native code (ocamlopt) support for architectures not
+currently supported by upstream OCaml 5.x multicore:
+
+[cols="1,1,2,1", options="header"]
+|===
+| Backend | Status | Tests | Date
+| i386 (32-bit x86) | icon:check-circle[role=green] pass | 1620 passed, 62 skipped, 0 failed | 2026-09-12
+| armhf (32-bit ARM) | icon:check-circle[role=green] pass | 1620 passed, 62 skipped, 0 failed | 2026-09-12
+| powerpc (32-bit PPC) | icon:check-circle[role=green] pass | 1617 passed, 65 skipped, 0 failed | 2026-09-12
+| ppc64 (64-bit PPC BE) | icon:check-circle[role=green] pass | 1625 passed, 57 skipped, 0 failed | 2026-09-12
+|===
+
+Based on upstream https://github.com/ocaml/ocaml[`trunk`] at `5087cbb24c`, rebased to `14c8d2cec9`.
+
+'''
+
 = README
 
 [CAUTION]
