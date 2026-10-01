@@ -882,9 +882,22 @@ and transl_prim_1 env p arg dbg =
   | Pintofbint bi ->
       tag_int (transl_unbox_int dbg env bi arg) dbg
   | Pbintoffloat bi ->
-      box_int dbg bi (Cop(Cintoffloat, [transl_unbox_float dbg env arg], dbg))
+      if bi = Pint64 && size_int = 4 then
+        (* On 32-bit targets, Cintoffloat produces only a native-word (32-bit)
+           integer, which is too narrow to hold an Int64.  Fall back to the
+           C helper, which allocates the boxed Int64. *)
+        Cop(Cextcall("caml_int64_of_float", typ_val, [], true),
+            [transl env arg], dbg)
+      else
+        box_int dbg bi (Cop(Cintoffloat, [transl_unbox_float dbg env arg], dbg))
   | Pfloatofbint bi ->
-      box_float dbg (Cop(Cfloatofint, [transl_unbox_int dbg env bi arg], dbg))
+      if bi = Pint64 && size_int = 4 then
+        (* On 32-bit targets, Cfloatofint only accepts a native-word (32-bit)
+           integer.  Fall back to the C helper for Int64 (allocates a float). *)
+        Cop(Cextcall("caml_int64_to_float", typ_val, [], true),
+            [transl env arg], dbg)
+      else
+        box_float dbg (Cop(Cfloatofint, [transl_unbox_int dbg env bi arg], dbg))
   | Pcvtbint(bi1, bi2) ->
       box_int dbg bi2 (transl_unbox_int dbg env bi1 arg)
   | Pnegbint bi ->
