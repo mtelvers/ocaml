@@ -542,6 +542,26 @@ CAMLprim intnat caml_atomic_fetch_add_raw (intnat *p, intnat raw_incr)
   return old;
 }
 
+/* Raw atomic exchange: swap *p with v, return the old value.
+   Used by arm/i386 selection.ml. */
+CAMLprim intnat caml_atomic_exchange_raw (intnat *p, intnat v)
+{
+  intnat old = atomic_exchange((atomic_intnat *)p, v);
+  atomic_thread_fence(memory_order_release);
+  return old;
+}
+
+/* Raw atomic compare-exchange: if *p == oldval, store newval and return oldval;
+   otherwise return the current value of *p.  Used by arm/i386 selection.ml. */
+CAMLprim intnat caml_atomic_compare_exchange_raw
+  (intnat *p, intnat oldval, intnat newval)
+{
+  intnat expected = oldval;
+  atomic_compare_exchange_strong((atomic_intnat *)p, &expected, newval);
+  atomic_thread_fence(memory_order_release);
+  return expected;
+}
+
 CAMLexport void caml_set_fields (value obj, value v)
 {
   CAMLassert (Is_block(obj));

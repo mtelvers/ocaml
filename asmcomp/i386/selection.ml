@@ -243,6 +243,16 @@ method! select_operation op args dbg =
   | Cextcall(fn, _ty_res, _ty_args, false)
     when !fast_math && List.mem fn inline_float_ops ->
       (Ispecific(Ifloatspecial fn), args)
+  (* Route atomic exchange/CAS through the generic C runtime helpers.
+     i386 handles Iatomic_fetch_add inline but has no emit for these two
+     operations. *)
+  | Catomic_exchange ->
+      (Iextcall { func = "caml_atomic_exchange_raw"; ty_res = typ_int;
+                  ty_args = [XInt; XInt]; alloc = false; stack_ofs = 0 }, args)
+  | Catomic_compare_exchange ->
+      (Iextcall { func = "caml_atomic_compare_exchange_raw"; ty_res = typ_int;
+                  ty_args = [XInt; XInt; XInt]; alloc = false; stack_ofs = 0 },
+       args)
   (* Default *)
   | _ -> super#select_operation op args dbg
 
