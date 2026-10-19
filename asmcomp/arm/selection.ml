@@ -223,6 +223,11 @@ method! select_operation op args dbg =
      issues in the stdlib), so delegate to caml_atomic_fetch_add_raw. *)
   | (Catomic_fetch_add, args) ->
       (self#iextcall "caml_atomic_fetch_add_raw" typ_int [XInt; XInt], args)
+  | (Catomic_exchange, args) ->
+      (self#iextcall "caml_atomic_exchange_raw" typ_int [XInt; XInt], args)
+  | (Catomic_compare_exchange, args) ->
+      (self#iextcall "caml_atomic_compare_exchange_raw"
+         typ_int [XInt; XInt; XInt], args)
   (* Turn integer division/modulus into runtime ABI calls *)
   | (Cdivi, args) ->
       (self#iextcall "__aeabi_idiv" typ_int [], args)
