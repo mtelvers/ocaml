@@ -831,6 +831,9 @@ let emit_instr env fallthrough i =
          lock xadd swaps the increment with *ptr atomically. *)
       I.mov (reg i.arg.(1)) (reg i.res.(0));
       I.lock_xadd (reg i.res.(0)) (mem32 DWORD 0 (reg32 i.arg.(0)))
+  | Lop (Iatomic_exchange | Iatomic_compare_exchange) ->
+      (* Routed to C calls by i386/selection.ml. *)
+      assert false
   | Lop (Ireturn_addr) ->
       (* Get return address from stack. On i386, return address is at esp + frame_size - 4 *)
       let offset = frame_size env - 4 in
