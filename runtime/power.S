@@ -1053,6 +1053,7 @@ FUNCTION caml_c_call_stack_args
         bctrl
    /* Pop the extra stack space used */
         add     SP, SP, STACK_ARG_BYTES
+#else
    /* Push the arguments and perform the call in a separate function, so that
       nothing is pushed between the c_stack_link and this frame.  The TSan
       raise path bounds its walk of the C stack at the c_stack_link (see
