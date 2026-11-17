@@ -20,12 +20,14 @@ frame X: main
 Breakpoint 3, ocaml_to_c (unit=1) at meander_c.c:XX
 5	    caml_callback(*caml_named_value
 frame X: ocaml_to_c
+frame X: caml_c_call_copy_stack_args
 frame X: caml_c_call_stack_args
 Breakpoint 1, 0x00000000000000 in caml_start_program ()
 frame X: caml_start_program
 frame X: caml_callback_exn
 frame X: caml_callback
 frame X: ocaml_to_c
+frame X: caml_c_call_copy_stack_args
 frame X: caml_c_call_stack_args
 Breakpoint 4, camlMeander.c_to_ocaml () at meander.ml:5
 5	let c_to_ocaml () = raise E1
